@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -49,22 +50,34 @@ func main() {
 		nodeName               string
 		hostIP                 string
 		netFabricName          string
+		allowedPrograms        string
 		kubeconfigFilename     string
 		workers                int
 		clientQPS, clientBurst int
+		blockProfileRate       int
+		mutexProfileFraction   int
 	)
 	flag.StringVar(&nodeName, "nodename", "", "node name")
 	flag.StringVar(&hostIP, "hostip", "", "host IP")
 	flag.StringVar(&netFabricName, "netfabric", "", "network fabric name")
+	flag.StringVar(&allowedPrograms, "allowed-programs", "", "comma-separated list of allowed pathnames for post-create and post-delete execs")
 	flag.StringVar(&kubeconfigFilename, "kubeconfig", "", "kubeconfig filename")
 	flag.IntVar(&workers, "workers", defaultNumWorkers, "number of worker threads")
 	flag.IntVar(&clientQPS, "qps", defaultClientQPS, "limit on rate of calls to api-server")
 	flag.IntVar(&clientBurst, "burst", defaultClientBurst, "allowance for transient burst of calls to api-server")
+	flag.IntVar(&blockProfileRate, "block-profile-rate", 0, "value given to `runtime.SetBlockProfileRate()`")
+	flag.IntVar(&mutexProfileFraction, "mutex-profile-fraction", 0, "value given to `runtime.SetMutexProfileFraction()`")
 	flag.Set("logtostderr", "true")
 	flag.Parse()
 
 	if len(os.Getenv("GOMAXPROCS")) == 0 {
 		runtime.GOMAXPROCS(runtime.NumCPU())
+	}
+	if blockProfileRate > 0 {
+		runtime.SetBlockProfileRate(blockProfileRate)
+	}
+	if mutexProfileFraction > 0 {
+		runtime.SetMutexProfileFraction(mutexProfileFraction)
 	}
 
 	var err error
@@ -95,6 +108,12 @@ func main() {
 	clientCfg.QPS = float32(clientQPS)
 	clientCfg.Burst = clientBurst
 
+	allowedProgramsSlice := strings.Split(allowedPrograms, ",")
+	allowedProgramsSet := make(map[string]struct{})
+	for _, ap := range allowedProgramsSlice {
+		allowedProgramsSet[ap] = struct{}{}
+	}
+
 	kcs, err := kosclientset.NewForConfig(clientCfg)
 	if err != nil {
 		glog.Errorf("Failed to build KOS clientset for kubeconfig=%q: %s\n", kubeconfigFilename, err.Error())
@@ -104,7 +123,7 @@ func main() {
 	// TODO think whether the rate limiter parameters make sense
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(200*time.Millisecond, 8*time.Hour), queueName)
 
-	ca := cactlr.NewConnectionAgent(nodeName, gonet.ParseIP(hostIP), kcs, queue, workers, netFabric)
+	ca := cactlr.NewConnectionAgent(nodeName, gonet.ParseIP(hostIP), kcs, queue, workers, netFabric, allowedProgramsSet)
 
 	glog.Infof("Connection Agent start, nodeName=%s, hostIP=%s, netFabric=%s, kubeconfig=%q, workers=%d, QPS=%d, burst=%d\n",
 		nodeName,

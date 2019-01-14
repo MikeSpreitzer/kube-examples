@@ -13,5 +13,8 @@
 # limitations under the License.
 
 FROM ubuntu:16.04
+RUN apt-get update
+RUN apt-get -y install iproute2 iputils-ping
 ADD connection-agent /
+ADD test-scripts/* /usr/local/kos/bin/
 ENTRYPOINT ["/connection-agent"]

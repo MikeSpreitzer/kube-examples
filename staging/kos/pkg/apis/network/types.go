@@ -16,7 +16,11 @@ limitations under the License.
 
 package network
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
@@ -131,7 +135,7 @@ type ExecReport struct {
 }
 
 // Equal tests whether the two referenced ExecReports say the same thing
-func (x *ExecReport) Equal(y *ExecReport) bool {
+func (x *ExecReport) Equiv(y *ExecReport) bool {
 	if x == y {
 		return true
 	}
@@ -141,8 +145,8 @@ func (x *ExecReport) Equal(y *ExecReport) bool {
 	return x.ExitStatus == y.ExitStatus &&
 		x.StdOut == y.StdOut &&
 		x.StdErr == y.StdErr &&
-		x.StartTime.Time.Equal(y.StartTime.Time) &&
-		x.StopTime.Time.Equal(y.StopTime.Time)
+		x.StartTime.Time.Truncate(time.Second).Equal(y.StartTime.Time.Truncate(time.Second)) &&
+		x.StopTime.Time.Truncate(time.Second).Equal(y.StopTime.Time.Truncate(time.Second))
 }
 
 // +genclient
