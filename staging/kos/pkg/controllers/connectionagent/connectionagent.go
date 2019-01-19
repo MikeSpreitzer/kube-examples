@@ -830,7 +830,7 @@ func (ca *ConnectionAgent) createOrUpdateIfc(attGuestIP, attHostIP gonet.IP, att
 	oldLocalState, attHasLocalIfc := ca.getLocalAttState(attNSN)
 	oldRemoteIfc, attHasRemoteIfc := ca.getRemoteIfc(attNSN)
 	newIfcNeedsToBeCreated := (!attHasLocalIfc && !attHasRemoteIfc) ||
-		(attHasLocalIfc && ifcNeedsUpdate(oldLocalState.HostIP, attHostIP, oldLocalState.GuestMAC, attMAC)) ||
+		(attHasLocalIfc && ifcNeedsUpdate(ca.hostIP, attHostIP, oldLocalState.GuestMAC, attMAC)) ||
 		(attHasRemoteIfc && ifcNeedsUpdate(oldRemoteIfc.HostIP, attHostIP, oldRemoteIfc.GuestMAC, attMAC))
 
 	if newIfcNeedsToBeCreated {
@@ -860,7 +860,6 @@ func (ca *ConnectionAgent) createOrUpdateIfc(attGuestIP, attHostIP gonet.IP, att
 					VNI:      attVNI,
 					GuestMAC: attMAC,
 					GuestIP:  attGuestIP,
-					HostIP:   attHostIP,
 				},
 				PostDeleteExec: PostDeleteExec,
 			}

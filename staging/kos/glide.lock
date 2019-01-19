@@ -1,5 +1,5 @@
 hash: 9c4323a05e2c827cc68034bc2ebcd846b85d1e6cf29951b47d0d58e55e270bb6
-updated: 2019-01-16T21:23:01.704709-05:00
+updated: 2019-01-19T16:12:26.995532-05:00
 imports:
 - name: bitbucket.org/ww/goautoneg
   version: 75cd24fc2f2c2a2088577d12123ddee5f54e0675
@@ -370,7 +370,7 @@ imports:
   - storage/v1alpha1
   - storage/v1beta1
 - name: k8s.io/apimachinery
-  version: 688d824527473e1e3f6c3f0b01171308393bdfe3
+  version: d49e237a2683fa6dc43a86c7b1b766e0219fb6e7
   subpackages:
   - pkg/api/equality
   - pkg/api/errors
@@ -428,7 +428,7 @@ imports:
   - third_party/forked/golang/json
   - third_party/forked/golang/reflect
 - name: k8s.io/apiserver
-  version: 56f0d9f8f1c3d4e170132aeb935134b9da006c79
+  version: 30d6a91f580b7a2a240dccebc1a35bff2a6940f6
   subpackages:
   - pkg/admission
   - pkg/admission/configuration
@@ -643,7 +643,7 @@ imports:
   - util/retry
   - util/workqueue
 - name: k8s.io/code-generator
-  version: 9de8e796a74d16d2a285165727d04c185ebca6dc
+  version: edc41f23fa918716df540b1486477d62237010e4
 - name: k8s.io/gengo
   version: 4242d8e6c5dba56827bb7bcf14ad11cda38f3991
 - name: k8s.io/kube-openapi

@@ -34,15 +34,14 @@ type Interface interface {
 	ListRemoteIfcs() ([]RemoteNetIfc, error)
 }
 
-type RemoteNetIfc struct {
+type LocalNetIfc struct {
+	Name     string
 	VNI      uint32
 	GuestMAC net.HardwareAddr
 	GuestIP  net.IP
-	HostIP   net.IP
 }
 
-type LocalNetIfc struct {
-	Name     string
+type RemoteNetIfc struct {
 	VNI      uint32
 	GuestMAC net.HardwareAddr
 	GuestIP  net.IP
