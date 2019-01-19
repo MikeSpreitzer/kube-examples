@@ -115,8 +115,8 @@ func (c *ConnectionAgent) RunCommand(attNSN k8stypes.NamespacedName, localIfc *n
 	}
 	c.attachmentExecDurationHistograms.With(prometheus.Labels{"what": what}).Observe(stopTime.Sub(startTime).Seconds())
 	c.attachmentExecStatusCounts.With(prometheus.Labels{"what": what, "exitStatus": strconv.FormatInt(int64(cr.ExitStatus), 10)}).Add(1)
+	glog.V(4).Infof("Exec report: vni=%06x, att=%s, what=%s, report=%#+v\n", localIfc.VNI, attNSN, what, cr)
 	if !saveReport {
-		glog.V(4).Info("Command report: vni=%06x, att=%s, what=%s, report=%#+v\n", localIfc.VNI, attNSN, what, cr)
 		return
 	}
 	c.setExecReport(attNSN, &cr)

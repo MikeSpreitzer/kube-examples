@@ -15,8 +15,10 @@ information to each node.
 
 This is an early work in progress.  Currently there are initial drafts
 of the kube API objects, the API extension server that holds them, the
-interface to the local network machinery, and the controller that
-assigns IP addresses.
+interface to the local network machinery, the controller that assigns
+IP addresses, the controller that invokes the local network machinery,
+an implementation of that interface that just logs invocations, and a
+test driver.
 
 ## Architecture
 
@@ -236,3 +238,9 @@ The following approaches were considered, with the last one adopted.
 
 A connection agent can and should be as selective regarding Subnets as
 regarding NetworkAttachments.
+
+
+## Test Driver
+
+See [cmd/attachment-tput-driver](cmd/attachment-tput-driver) for a
+test driver.

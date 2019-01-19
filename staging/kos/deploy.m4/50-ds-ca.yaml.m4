@@ -33,3 +33,4 @@ spec:
         - -nodename=$(NODE_NAME)
         - -hostip=$(HOST_IP)
         - -netfabric=logger
+        - -allowed-programs=/usr/local/kos/bin/TestByPing,/usr/local/kos/bin/RemoveNetNS

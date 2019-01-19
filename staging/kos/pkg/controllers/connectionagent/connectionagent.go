@@ -184,7 +184,7 @@ type ConnectionAgent struct {
 	nsnToVNIs      map[k8stypes.NamespacedName]map[uint32]struct{}
 
 	// allowedPrograms is the values allowed to appear in the [0] of a
-	// slice to exec post create or delete.
+	// slice to exec post-create or -delete.
 	allowedPrograms map[string]struct{}
 
 	attachmentExecDurationHistograms *prometheus.HistogramVec
@@ -212,7 +212,8 @@ func NewConnectionAgent(localNodeName string,
 	kcs *kosclientset.Clientset,
 	queue k8sworkqueue.RateLimitingInterface,
 	workers int,
-	netFabric netfabric.Interface) *ConnectionAgent {
+	netFabric netfabric.Interface,
+	allowedPrograms map[string]struct{}) *ConnectionAgent {
 
 	attachmentExecDurationHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -249,6 +250,7 @@ func NewConnectionAgent(localNodeName string,
 		nsnToPostCreateExecReport:        make(map[k8stypes.NamespacedName]*netv1a1.ExecReport),
 		nsnToRemoteIfc:                   make(map[k8stypes.NamespacedName]netfabric.RemoteNetIfc),
 		nsnToVNIs:                        make(map[k8stypes.NamespacedName]map[uint32]struct{}),
+		allowedPrograms:                  allowedPrograms,
 		attachmentExecDurationHistograms: attachmentExecDurationHistograms,
 		attachmentExecStatusCounts:       attachmentExecStatusCounts,
 	}
@@ -423,7 +425,7 @@ func (ca *ConnectionAgent) syncPreExistingRemoteIfcs() error {
 		if remoteAttsInformer != nil {
 			if !remoteAttsInformer.HasSynced() &&
 				!k8scache.WaitForCacheSync(remoteAttsInformerStopCh, remoteAttsInformer.HasSynced) {
-				return fmt.Errorf("failed to sync cache of remote attachments for VNI %d", ifcVNI)
+				return fmt.Errorf("failed to sync cache of remote attachments for VNI %06x", ifcVNI)
 			}
 			ifcOwnerAtts, err = remoteAttsInformer.GetIndexer().ByIndex(attMACIndexName, ifcMAC)
 		}
@@ -489,8 +491,9 @@ func (ca *ConnectionAgent) processQueue() {
 
 func (ca *ConnectionAgent) processQueueItem(attNSN k8stypes.NamespacedName) {
 	defer ca.queue.Done(attNSN)
-	err := ca.processNetworkAttachment(attNSN)
 	requeues := ca.queue.NumRequeues(attNSN)
+	glog.V(5).Infof("Working on attachment %s, with %d earlier requeues\n", attNSN, requeues)
+	err := ca.processNetworkAttachment(attNSN)
 	if err != nil {
 		// If we're here there's been an error: either the attachment current state was
 		// ambiguous (e.g. more than one vni), or there's been a problem while processing
@@ -575,7 +578,7 @@ func (ca *ConnectionAgent) getAttachment(attNSN k8stypes.NamespacedName) (*netv1
 		// this will cause a reference to be enqueued, so it will be processed
 		// again when the ambiguity has been resolved (assuming it has not been
 		// seen with other VNIs meanwhile).
-		glog.V(4).Infof("Att %s has inconsistent state: found both in local atts cache and remote atts cache for VNI %d",
+		glog.V(4).Infof("Att %s has inconsistent state: found both in local atts cache and remote atts cache for VNI %06x",
 			attNSN,
 			vni)
 	case attAsLocal != nil && attAsRemote == nil:
@@ -596,6 +599,7 @@ func (ca *ConnectionAgent) getAttachment(attNSN k8stypes.NamespacedName) (*netv1
 func (ca *ConnectionAgent) processExistingAtt(att *netv1a1.NetworkAttachment) error {
 	attNSN, attVNI := kosctlrutils.AttNSN(att), att.Status.AddressVNI
 	attNode := att.Spec.Node
+	glog.V(5).Infof("Working on existing: attachment=%s, node=%s, resourceVersion=%s\n", attNSN, attNode, att.ResourceVersion)
 
 	// Update the vnState associated with the attachment. This typically involves
 	// adding the attachment to the vnState associated to its vni (and initializing
@@ -645,19 +649,34 @@ func (ca *ConnectionAgent) processExistingAtt(att *netv1a1.NetworkAttachment) er
 	// The attachment is local, so make sure its status reflects the
 	// state held here
 	localHostIPStr := ca.hostIP.String()
-	if att.Status.HostIP != localHostIPStr ||
+	if localHostIPStr != att.Status.HostIP ||
 		ifcName != att.Status.IfcName ||
 		macAddrS != att.Status.MACAddress ||
-		!pcer.Equal(att.Status.PostCreateExecReport) {
+		!pcer.Equiv(att.Status.PostCreateExecReport) {
+
+		glog.V(5).Infof("Attempting update of %s from resourceVersion=%s because host IP %q != %q or ifcName %q != %q or MAC address %q != %q or PCER %#+v != %#+v\n", attNSN, att.ResourceVersion, localHostIPStr, att.Status.HostIP, ifcName, att.Status.IfcName, macAddrS, att.Status.MACAddress, pcer, att.Status.PostCreateExecReport)
+		if pcer != nil && att.Status.PostCreateExecReport != nil {
+			glog.V(5).Infof("For attachment %s: PCER StartTimes are %s and %s, difference=%d, StopTimes are %s and %s, difference=%d\n", attNSN, pcer.StartTime.Time, att.Status.PostCreateExecReport.StartTime.Time, pcer.StartTime.Time.Sub(att.Status.PostCreateExecReport.StartTime.Time), pcer.StopTime.Time, att.Status.PostCreateExecReport.StopTime.Time, pcer.StopTime.Time.Sub(att.Status.PostCreateExecReport.StopTime.Time))
+		}
 
 		updatedAtt, err := ca.setAttStatus(att, macAddrS, ifcName, pcer)
 		if err != nil {
+			glog.V(3).Infof("Failed to update att %s status: oldRV=%s,  macAddress=%s, ifcName=%s, PostCreateExecReport=%#+v\n",
+				attNSN,
+				att.ResourceVersion,
+				macAddrS,
+				ifcName,
+				pcer)
 			return err
 		}
-		glog.V(3).Infof("Updated att %s status with hostIP: %s, ifcName: %s",
+		glog.V(3).Infof("Updated att %s status: oldRV=%s, newRV=%s, hostIP=%s, macAddress=%s, ifcName=%s, PostCreateExecReport=%#+v\n",
 			attNSN,
+			att.ResourceVersion,
+			updatedAtt.ResourceVersion,
 			updatedAtt.Status.HostIP,
-			updatedAtt.Status.IfcName)
+			updatedAtt.Status.MACAddress,
+			updatedAtt.Status.IfcName,
+			updatedAtt.Status.PostCreateExecReport)
 	}
 
 	return nil
@@ -734,7 +753,7 @@ func (ca *ConnectionAgent) updateVNStateForExistingAtt(attNSN k8stypes.Namespace
 			ca.unsetVNStateVNI(attNSN)
 		}
 		if firstLocalAttInVN {
-			glog.V(2).Infof("VN with ID %d became relevant: an Informer has been started", vni)
+			glog.V(2).Infof("VN with ID %06x became relevant: an Informer has been started", vni)
 		}
 	}()
 
@@ -910,7 +929,7 @@ func (ca *ConnectionAgent) removeAttFromVNState(attName string, vni uint32) *vnS
 // can be deleted.
 func (ca *ConnectionAgent) clearVNResources(vnState *vnState, lastAttName string, vni uint32) {
 	close(vnState.remoteAttsInformerStopCh)
-	glog.V(2).Infof("NetworkAttachment %s/%s was the last local with vni %d: remote attachments informer was stopped",
+	glog.V(2).Infof("NetworkAttachment %s/%s was the last local with vni %06x: remote attachments informer was stopped",
 		vnState.namespace,
 		lastAttName,
 		vni)
@@ -954,7 +973,7 @@ func (ca *ConnectionAgent) initVNState(vni uint32, namespace string) *vnState {
 
 func (ca *ConnectionAgent) onRemoteAttAdded(obj interface{}) {
 	att := obj.(*netv1a1.NetworkAttachment)
-	glog.V(5).Infof("Remote NetworkAttachments cache for VNI %d: notified of addition of %#+v",
+	glog.V(5).Infof("Remote NetworkAttachments cache for VNI %06x: notified of addition of %#+v",
 		att.Status.AddressVNI,
 		att)
 	attNSN := kosctlrutils.AttNSN(att)
@@ -965,7 +984,7 @@ func (ca *ConnectionAgent) onRemoteAttAdded(obj interface{}) {
 func (ca *ConnectionAgent) onRemoteAttUpdated(oldObj, newObj interface{}) {
 	oldAtt := oldObj.(*netv1a1.NetworkAttachment)
 	newAtt := newObj.(*netv1a1.NetworkAttachment)
-	glog.V(5).Infof("Remote NetworkAttachments cache for VNI %d: notified of update from %#+v to %#+v",
+	glog.V(5).Infof("Remote NetworkAttachments cache for VNI %06x: notified of update from %#+v to %#+v",
 		newAtt.Status.AddressVNI,
 		oldAtt,
 		newAtt)
@@ -975,7 +994,7 @@ func (ca *ConnectionAgent) onRemoteAttUpdated(oldObj, newObj interface{}) {
 func (ca *ConnectionAgent) onRemoteAttRemoved(obj interface{}) {
 	peeledObj := kosctlrutils.Peel(obj)
 	att := peeledObj.(*netv1a1.NetworkAttachment)
-	glog.V(5).Infof("Remote NetworkAttachments cache for VNI %d: notified of deletion of %#+v",
+	glog.V(5).Infof("Remote NetworkAttachments cache for VNI %06x: notified of deletion of %#+v",
 		att.Status.AddressVNI,
 		att)
 	attNSN := kosctlrutils.AttNSN(att)

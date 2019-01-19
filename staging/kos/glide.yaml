@@ -65,3 +65,4 @@ import:
 - package: k8s.io/gengo
 - package: github.com/prometheus/client_golang
   version: ~0.9.2
+- package: golang.org/x/oauth2

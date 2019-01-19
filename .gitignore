@@ -1,6 +1,8 @@
 # The built binaries
 staging/kos/images/*/*r
 staging/kos/images/*/*/*[rt]
+staging/kos/images/controllers/connectionagent/test-scripts
+staging/kos/local-binaries
 
 # The generated manifests
 staging/kos/deploy/50-rs-*.yaml
