@@ -55,6 +55,8 @@ import (
 	"k8s.io/examples/staging/kos/pkg/util/parse"
 )
 
+// TODO remove this comment
+
 const (
 	// Name of the indexer which computes a string concatenating the VNI and IP
 	// of a network attachment. Used for syncing pre-existing interfaces at
