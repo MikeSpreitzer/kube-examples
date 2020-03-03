@@ -115,6 +115,11 @@ var (
 	attsLeft uint64
 )
 
+var (
+	opsCompleted, totalLateOps *uint64
+	totalOpsDelayNanos         *int64
+)
+
 type TrackingHistogram interface {
 	prometheus.Histogram
 	ObserveAt(x float64, ns, name string)
@@ -1092,6 +1097,7 @@ func main() {
 	deleteLatencyHistogram.DumpToLog()
 	glog.Warningf("Address checks: multiOwnerWarnings=%d\n", multiOwnerWarnings)
 	fmt.Println()
+	glog.Warningf("late ops: %.2f %\ntotal ops delay: %.2f ms", 100*float64(*totalLateOps)/float64(*opsCompleted), float64(*totalOpsDelayNanos)/float64(1000))
 	fmt.Print("Don't forget to `kubectl delete Namespace -l app=attachment-tput-driver`!\n")
 	return
 }
@@ -1126,10 +1132,18 @@ func selectSlots(thd, numThreads int, from []VirtNetAttachment) []VirtNetAttachm
 func RunThread(kClientset *kosclientset.Clientset, stopCh <-chan struct{}, work []VirtNetAttachment, nodes []k8sv1.Node, nattNameFmt, runID string, opsTimes OpsSchedule, tbase time.Time, numAttsToCreate, thd, numThreads uint64, roundRobin, justCreate bool) {
 	glog.Warningf("Thread start: thd=%d, numAttachments=%d, stride=%d\n", thd, numAttsToCreate, numThreads)
 	var iCreate, iDelete uint64
+	var lateOps uint64
+	var opsDelay time.Duration
+	defer func() {
+		atomic.AddUint64(opsCompleted, iCreate+iDelete)
+		atomic.AddUint64(totalLateOps, lateOps)
+		atomic.AddInt64(totalOpsDelayNanos, int64(opsDelay))
+	}()
 	var workLen = uint64(len(work))
 	attachmentsDirect := kClientset.NetworkV1alpha1().NetworkAttachments(theKubeNS)
 	createAllowed := true
 	for iDelete < numAttsToCreate {
+		hadToWait := false
 		for {
 			var nextOpIdx uint64
 			if iCreate+iDelete < opsPerThdMin {
@@ -1140,11 +1154,15 @@ func RunThread(kClientset *kosclientset.Clientset, stopCh <-chan struct{}, work 
 			dt := opsTimes[nextOpIdx]
 			xd := atomic.AddInt64(&xtraDelayI, 0)
 			targt := tbase.Add(time.Duration(int64(dt) + xd))
-			now := time.Now()
-			if !targt.After(now) {
+			gap := targt.Sub(time.Now())
+			if gap <= 0 {
+				if gap < 0 && !hadToWait {
+					lateOps++
+					opsDelay = -gap
+				}
 				break
 			}
-			gap := targt.Sub(now)
+			hadToWait = true
 			time.Sleep(gap)
 		}
 		if atomic.LoadUint32(&stoppers) > 0 {
