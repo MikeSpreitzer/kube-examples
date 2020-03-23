@@ -10,10 +10,11 @@ ifc_ip=$3
 peer_ip=$4
 count=${5:-5}
 peer_name=$6
+strace_output_fd="&3"
 
 ip link show $ifc_name || exit 2
 echo "===$(date +%M:%S): NetNS===" >&2
-ip netns add $netns_name
+strace -f -o "| cat>$strace_output_fd" ip netns add $netns_name
 sleep 1
 echo "===$(date +%M:%S): Move===" >&2
 ip link set $ifc_name netns $netns_name

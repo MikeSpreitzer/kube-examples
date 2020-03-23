@@ -2454,8 +2454,14 @@ func schema_pkg_apis_network_v1alpha1_ExecReport(ref common.ReferenceCallback) c
 							Format: "",
 						},
 					},
+					"addNetnsStrace": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
 				},
-				Required: []string{"command", "exitStatus", "stdOut", "stdErr"},
+				Required: []string{"command", "exitStatus", "stdOut", "stdErr", "addNetnsStrace"},
 			},
 		},
 		Dependencies: []string{

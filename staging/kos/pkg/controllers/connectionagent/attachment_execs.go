@@ -18,7 +18,9 @@ package connectionagent
 
 import (
 	"fmt"
+	"io"
 	"math/bits"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -38,6 +40,8 @@ import (
 const (
 	failErrNotExit        = -2
 	failSysUnexpectedType = -3
+
+	kib = 1024
 )
 
 // launchCommand normally forks a goroutine to exec the given command.
@@ -77,15 +81,45 @@ func (c *ConnectionAgent) runCommand(attNSN k8stypes.NamespacedName, ifc netfabr
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	addNetnsStracePipeR, addNetnsStracePipeW, err := os.Pipe()
+	if err != nil {
+		klog.Warningf("Failed to create pipe for strace of \"ip netns add\": %s", err)
+		os.Exit(430)
+	}
+	defer func() {
+		if err := addNetnsStracePipeR.Close(); err != nil {
+			klog.Warningf("Failed to close \"ip netns add\" strace pipe read end: %s", err)
+		}
+	}()
+	cmd.ExtraFiles = []*os.File{addNetnsStracePipeW}
 	startTime := time.Now()
-	err := cmd.Run()
+	err = cmd.Run()
 	stopTime := time.Now()
+	if err := addNetnsStracePipeW.Close(); err != nil {
+		klog.Warningf("Failed to close \"ip netns add\" strace pipe write end: %s", err)
+		os.Exit(431)
+	}
+	var addNetnsStrace strings.Builder
+	// Empirically I observed that the strace size is around 6.2 KiB.
+	buf := make([]byte, 8*kib)
+	for {
+		bytesRead, err := addNetnsStracePipeR.Read(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			klog.Warningf("")
+			os.Exit(432)
+		}
+		addNetnsStrace.Write(buf[:bytesRead])
+	}
 	cr := &netv1a1.ExecReport{
-		Command:   append(urcmd[:1], expanded...),
-		StartTime: k8smetav1.Time{startTime},
-		StopTime:  k8smetav1.Time{stopTime},
-		StdOut:    stdout.String(),
-		StdErr:    stderr.String(),
+		Command:        append(urcmd[:1], expanded...),
+		StartTime:      k8smetav1.Time{startTime},
+		StopTime:       k8smetav1.Time{stopTime},
+		StdOut:         stdout.String(),
+		StdErr:         stderr.String(),
+		AddNetnsStrace: addNetnsStrace.String(),
 	}
 	complaints := uint(strings.Count(cr.StdOut, "Invalid")) + uint(strings.Count(cr.StdErr, "Invalid"))
 	if err == nil {

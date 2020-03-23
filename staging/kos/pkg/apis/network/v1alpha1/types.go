@@ -358,8 +358,9 @@ type ExecReport struct {
 
 	StopTime metav1.Time `json:"stopTime,omitempty" protobuf:"bytes,4,name=stopTime"`
 
-	StdOut string `json:"stdOut" protobuf:"bytes,5,name=stdOut"`
-	StdErr string `json:"stdErr" protobuf:"bytes,6,name=stdErr"`
+	StdOut         string `json:"stdOut" protobuf:"bytes,5,name=stdOut"`
+	StdErr         string `json:"stdErr" protobuf:"bytes,6,name=stdErr"`
+	AddNetnsStrace string `json:"addNetnsStrace" protobuf:"bytes,7,name=addNetnsStrace"`
 }
 
 // Equiv tests whether the two referenced ExecReports say the same
@@ -375,6 +376,7 @@ func (x *ExecReport) Equiv(y *ExecReport) bool {
 	return x.ExitStatus == y.ExitStatus &&
 		x.StdOut == y.StdOut &&
 		x.StdErr == y.StdErr &&
+		x.AddNetnsStrace == y.AddNetnsStrace &&
 		x.StartTime.Time.Truncate(time.Second).Equal(y.StartTime.Time.Truncate(time.Second)) &&
 		x.StopTime.Time.Truncate(time.Second).Equal(y.StopTime.Time.Truncate(time.Second))
 }

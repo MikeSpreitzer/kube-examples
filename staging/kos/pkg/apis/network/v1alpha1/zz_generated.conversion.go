@@ -205,6 +205,7 @@ func autoConvert_v1alpha1_ExecReport_To_network_ExecReport(in *ExecReport, out *
 	out.StopTime = in.StopTime
 	out.StdOut = in.StdOut
 	out.StdErr = in.StdErr
+	out.AddNetnsStrace = in.AddNetnsStrace
 	return nil
 }
 
@@ -220,6 +221,7 @@ func autoConvert_network_ExecReport_To_v1alpha1_ExecReport(in *network.ExecRepor
 	out.StopTime = in.StopTime
 	out.StdOut = in.StdOut
 	out.StdErr = in.StdErr
+	out.AddNetnsStrace = in.AddNetnsStrace
 	return nil
 }
 
