@@ -14,7 +14,7 @@ strace_output_fd="&3"
 
 ip link show $ifc_name || exit 2
 echo "===$(date +%M:%S): NetNS===" >&2
-strace -f -yy -v -x -o "| cat>$strace_output_fd" ip netns add $netns_name
+strace -f -yy -v -x -tt -T -o "| cat>$strace_output_fd" ip netns add $netns_name
 sleep 1
 echo "===$(date +%M:%S): Move===" >&2
 ip link set $ifc_name netns $netns_name
