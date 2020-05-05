@@ -168,10 +168,18 @@ func (networkattachmentStatusStrategy) PrepareForUpdate(ctx context.Context, obj
 	newNA.Spec = oldNA.Spec
 	newNA.ExtendedObjectMeta = oldNA.ExtendedObjectMeta
 	now := network.Now()
-	if oldNA.Status.LockUID != newNA.Status.LockUID || oldNA.Status.AddressVNI != newNA.Status.AddressVNI || oldNA.Status.IPv4 != newNA.Status.IPv4 || !SliceOfStringEqual(oldNA.Status.Errors.IPAM, newNA.Status.Errors.IPAM) {
+	if oldNA.Status.LockUID != newNA.Status.LockUID ||
+		oldNA.Status.AddressVNI != newNA.Status.AddressVNI ||
+		oldNA.Status.IPv4 != newNA.Status.IPv4 ||
+		!oldNA.Status.WaitedForIPAM.Equal(newNA.Status.WaitedForIPAM) ||
+		!SliceOfStringEqual(oldNA.Status.Errors.IPAM, newNA.Status.Errors.IPAM) {
 		newNA.Writes = newNA.Writes.SetWrite(network.NASectionAddr, now)
 	}
-	if oldNA.Status.MACAddress != newNA.Status.MACAddress || oldNA.Status.IfcName != newNA.Status.IfcName || oldNA.Status.HostIP != newNA.Status.HostIP || !SliceOfStringEqual(oldNA.Status.Errors.Host, newNA.Status.Errors.Host) {
+	if oldNA.Status.MACAddress != newNA.Status.MACAddress ||
+		oldNA.Status.IfcName != newNA.Status.IfcName ||
+		oldNA.Status.HostIP != newNA.Status.HostIP ||
+		!oldNA.Status.WaitedForCA.Equal(newNA.Status.WaitedForCA) ||
+		!SliceOfStringEqual(oldNA.Status.Errors.Host, newNA.Status.Errors.Host) {
 		newNA.Writes = newNA.Writes.SetWrite(network.NASectionImpl, now)
 	}
 	if !oldNA.Status.PostCreateExecReport.Equiv(newNA.Status.PostCreateExecReport) {

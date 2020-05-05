@@ -441,6 +441,8 @@ func autoConvert_v1alpha1_NetworkAttachmentStatus_To_network_NetworkAttachmentSt
 	out.IfcName = in.IfcName
 	out.HostIP = in.HostIP
 	out.PostCreateExecReport = (*network.ExecReport)(unsafe.Pointer(in.PostCreateExecReport))
+	out.WaitedForIPAM = network.WaitedForStatus(in.WaitedForIPAM)
+	out.WaitedForCA = network.WaitedForStatus(in.WaitedForCA)
 	return nil
 }
 
@@ -460,6 +462,8 @@ func autoConvert_network_NetworkAttachmentStatus_To_v1alpha1_NetworkAttachmentSt
 	out.IfcName = in.IfcName
 	out.HostIP = in.HostIP
 	out.PostCreateExecReport = (*ExecReport)(unsafe.Pointer(in.PostCreateExecReport))
+	out.WaitedForIPAM = WaitedForStatus(in.WaitedForIPAM)
+	out.WaitedForCA = WaitedForStatus(in.WaitedForCA)
 	return nil
 }
 

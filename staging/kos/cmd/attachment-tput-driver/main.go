@@ -76,9 +76,12 @@ const (
 	HistogramNamespace = "kos"
 	HistogramSubsystem = "driver"
 
-	esLabel           = "ES"
-	lgComplaintsLabel = "lgComplaints"
-	fullLabel         = "full"
+	runIDLabel           = "runID"
+	esLabel              = "ES"
+	lgComplaintsLabel    = "lgComplaints"
+	fullLabel            = "full"
+	naWaitedForIPAMLabel = "waited_for_ipam"
+	naWaitedForCALabel   = "waited_for_ca"
 
 	// The name of the annotation holding the client-side creation timestamp.
 	createTimestampAnnotationKey = "precise/createTimestamp"
@@ -91,20 +94,20 @@ const (
 )
 
 var (
-	createLatencyHistogram      TrackingHistogram
-	createToAddressedHistogram  TrackingHistogram
-	createToReadyHistogram      TrackingHistogram
-	createToBrokenHistogram     TrackingHistogram
-	createToHalfTestedHistogram TrackingHistogram
-	readyToHalfTestedHistogram  TrackingHistogram
-	createToTestedHistogram     TrackingHistogram
-	readyToTestedHistogram      TrackingHistogram
-	deleteLatencyHistogram      TrackingHistogram
-	testCounts                  *prometheus.CounterVec
-	successfulCreates           prometheus.Counter
-	failedCreates               prometheus.Counter
-	successfulDeletes           prometheus.Counter
-	failedDeletes               prometheus.Counter
+	createLatencyHistogram       TrackingHistogram
+	createToAddressedHistograms  TrackingHistogramVec
+	createToReadyHistograms      TrackingHistogramVec
+	createToBrokenHistograms     TrackingHistogramVec
+	createToHalfTestedHistograms TrackingHistogramVec
+	readyToHalfTestedHistograms  TrackingHistogramVec
+	createToTestedHistograms     TrackingHistogramVec
+	readyToTestedHistograms      TrackingHistogramVec
+	deleteLatencyHistogram       TrackingHistogram
+	testCounts                   *prometheus.CounterVec
+	successfulCreates            prometheus.Counter
+	failedCreates                prometheus.Counter
+	successfulDeletes            prometheus.Counter
+	failedDeletes                prometheus.Counter
 )
 
 // The following vars are used by threads to determine the time at which the
@@ -123,46 +126,6 @@ var (
 	opsCompleted, totalLateOps uint64
 	totalOpsDelayNanos         int64
 )
-
-type TrackingHistogram interface {
-	prometheus.Histogram
-	ObserveAt(x float64, ns, name string)
-	DumpToLog()
-}
-
-type trackingHistogram struct {
-	prometheus.Histogram
-	name string
-
-	statMu  sync.Mutex
-	maxX    float64
-	maxNS   string
-	maxName string
-}
-
-var _ prometheus.Histogram = &trackingHistogram{}
-var _ TrackingHistogram = &trackingHistogram{}
-
-func (th *trackingHistogram) ObserveAt(x float64, ns, name string) {
-	th.Histogram.Observe(x)
-	th.statMu.Lock()
-	defer func() { th.statMu.Unlock() }()
-	if x > th.maxX {
-		th.maxX = x
-		th.maxNS = ns
-		th.maxName = name
-		// fmt.Printf("%s: maxX=%g, maxAt=%s/%s\n", th.name, th.maxX, th.maxNS, th.maxName)
-	}
-}
-
-func (th *trackingHistogram) DumpToLog() {
-	glog.Warningf("TrackingHistogram stats: histogram=%s, maxX=%g, maxAt=%s/%s\n", th.name, th.maxX, th.maxNS, th.maxName)
-}
-
-func NewTrackingHistogram(opts prometheus.HistogramOpts) TrackingHistogram {
-	h := prometheus.NewHistogram(opts)
-	return &trackingHistogram{Histogram: h, name: opts.Name}
-}
 
 var theKubeNS string
 
@@ -388,12 +351,10 @@ func (slot *Slot) observeState(virtNet *VirtNet, slotIndex int, natt *netv1a1.Ne
 				glog.Infof("NetworkAttachment.Status.IPv4 is not in range: attachment=%s/%s, VNI=%06x, subnet=%s, node=%s, ipv4=%s\n", theKubeNS, natt.Name, virtNet.ID, natt.Spec.Subnet, natt.Spec.Node, natt.Status.IPv4)
 			}
 		}
-		virtNet.ipAddressChanged(slot, slot.currentNodeName, oldIPv4, natt.Status.IPv4, slot.currentAttachmentName)
+		virtNet.ipAddressChanged(slot.currentNodeName, oldIPv4, natt.Status.IPv4, slot.currentAttachmentName)
 	}
-	if natt.Status.IPv4 != "" {
-		if slot.addressedTime == (time.Time{}) {
-			slot.addressedTime = now
-		}
+	if natt.Status.IPv4 != "" && slot.addressedTime == (time.Time{}) {
+		slot.addressedTime = now
 	}
 	if natt.Status.IfcName != "" {
 		if slot.readyTime == (time.Time{}) {
@@ -413,12 +374,10 @@ func (slot *Slot) observeState(virtNet *VirtNet, slotIndex int, natt *netv1a1.Ne
 			slot.testES = cr.ExitStatus
 			complaints := uint(strings.Count(cr.StdOut, "Invalid")) + uint(strings.Count(cr.StdErr, "Invalid"))
 			slot.testLgComplaints = bits.Len(complaints) - 1
-			if cr.ExitStatus != 0 {
-				glog.Infof("Non-zero test exit status: attachment=%s/%s, VNI=%06x, subnet=%s, RV=%s, node=%s, IPv4=%s, MAC=%s, testES=%d, complaints=%d, StartTime=%s, StopTime=%s, StdOut=%q, StdErr=%q\n", theKubeNS, slot.currentAttachmentName, virtNet.ID, natt.Spec.Subnet, natt.ResourceVersion, natt.Spec.Node, natt.Status.IPv4, natt.Status.MACAddress, cr.ExitStatus, complaints, cr.StartTime, cr.StopTime, cr.StdOut, cr.StdErr)
-			}
 			if slot.testES == 0 {
 				cd.NoteTested(slotIndex)
 			} else {
+				glog.Infof("Non-zero test exit status: attachment=%s/%s, VNI=%06x, subnet=%s, RV=%s, node=%s, IPv4=%s, MAC=%s, testES=%d, complaints=%d, StartTime=%s, StopTime=%s, StdOut=%q, StdErr=%q\n", theKubeNS, slot.currentAttachmentName, virtNet.ID, natt.Spec.Subnet, natt.ResourceVersion, natt.Spec.Node, natt.Status.IPv4, natt.Status.MACAddress, cr.ExitStatus, complaints, cr.StartTime, cr.StopTime, cr.StdOut, cr.StdErr)
 				cd.NoteNoTest(slotIndex)
 				if *stopOnPingFail {
 					atomic.AddUint32(&stoppers, 1)
@@ -450,12 +409,12 @@ func hasBrokenIPAM(errs []string) bool {
 
 // ipAddressChanged changes the IPv4 address of a NetworkAttachment.
 // Caller may hold Slot's mutex.
-func (virtNet *VirtNet) ipAddressChanged(slot *Slot, currentNodeName, oldIPv4, newIPv4, currentAttachmentName string) {
-	virtNet.ipAddressChangedAtNode(slot, currentNodeName, oldIPv4, newIPv4, currentAttachmentName)
-	virtNet.ipAddressChangedInNS(slot, oldIPv4, newIPv4, currentAttachmentName)
+func (virtNet *VirtNet) ipAddressChanged(currentNodeName, oldIPv4, newIPv4, currentAttachmentName string) {
+	virtNet.ipAddressChangedAtNode(currentNodeName, oldIPv4, newIPv4, currentAttachmentName)
+	virtNet.ipAddressChangedInNS(oldIPv4, newIPv4, currentAttachmentName)
 }
 
-func (virtNet *VirtNet) ipAddressChangedInNS(slot *Slot, oldIPv4, newIPv4, currentAttachmentName string) {
+func (virtNet *VirtNet) ipAddressChangedInNS(oldIPv4, newIPv4, currentAttachmentName string) {
 	var warnSet string
 	virtNet.addrsMutex.Lock()
 	defer func() {
@@ -487,7 +446,7 @@ func (virtNet *VirtNet) ipAddressChangedInNS(slot *Slot, oldIPv4, newIPv4, curre
 	}
 }
 
-func (virtNet *VirtNet) ipAddressChangedAtNode(slot *Slot, currentNodeName, oldIPv4, newIPv4, currentAttachmentName string) {
+func (virtNet *VirtNet) ipAddressChangedAtNode(currentNodeName, oldIPv4, newIPv4, currentAttachmentName string) {
 	virtNet.nodeMutex.Lock()
 	defer func() { virtNet.nodeMutex.Unlock() }()
 	nd := virtNet.nodeMap[currentNodeName]
@@ -529,33 +488,39 @@ func (slot *Slot) close(VNI uint32, nsName string) *netv1a1.NetworkAttachment {
 	virtNet := idToVirtNet[VNI]
 	// now we know slot.natt != nil
 	if slot.addressedTime != (time.Time{}) {
-		createToAddressedHistogram.ObserveAt(slot.addressedTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
+		createToAddressedHistograms.With(prometheus.Labels{
+			naWaitedForIPAMLabel: slot.natt.Status.WaitedForIPAM.String(),
+		}).ObserveAt(slot.addressedTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
 	}
 	if slot.natt.Status.IPv4 != "" {
-		virtNet.ipAddressChanged(slot, slot.currentNodeName, slot.natt.Status.IPv4, "", slot.currentAttachmentName)
+		virtNet.ipAddressChanged(slot.currentNodeName, slot.natt.Status.IPv4, "", slot.currentAttachmentName)
+	}
+	waitForIPAMAndCALabels := prometheus.Labels{
+		naWaitedForIPAMLabel: slot.natt.Status.WaitedForIPAM.String(),
+		naWaitedForCALabel:   slot.natt.Status.WaitedForCA.String(),
 	}
 	if slot.readyTime != (time.Time{}) {
-		createToReadyHistogram.ObserveAt(slot.readyTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
+		createToReadyHistograms.With(waitForIPAMAndCALabels).ObserveAt(slot.readyTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
 	}
 	if slot.brokenTime != (time.Time{}) {
-		createToBrokenHistogram.ObserveAt(slot.brokenTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
+		createToBrokenHistograms.With(waitForIPAMAndCALabels).ObserveAt(slot.brokenTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
 	}
 	if slot.testedTime != (time.Time{}) {
-		c2t := createToHalfTestedHistogram
-		r2t := readyToHalfTestedHistogram
+		c2t := createToHalfTestedHistograms
+		r2t := readyToHalfTestedHistograms
 		if slot.fullTest {
-			c2t = createToTestedHistogram
-			r2t = readyToTestedHistogram
+			c2t = createToTestedHistograms
+			r2t = readyToTestedHistograms
 		}
-		c2t.ObserveAt(slot.testedTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
-		r2t.ObserveAt(slot.testedTime.Sub(slot.readyTime).Seconds(), nsName, slot.natt.Name)
+		c2t.With(waitForIPAMAndCALabels).ObserveAt(slot.testedTime.Sub(slot.preCreateTime).Seconds(), nsName, slot.natt.Name)
+		r2t.With(waitForIPAMAndCALabels).ObserveAt(slot.testedTime.Sub(slot.readyTime).Seconds(), nsName, slot.natt.Name)
 		testCounts.With(prometheus.Labels{esLabel: strconv.FormatInt(int64(slot.testES), 10), lgComplaintsLabel: strconv.FormatInt(int64(slot.testLgComplaints), 10), fullLabel: strconv.FormatBool(slot.fullTest)}).Inc()
 	}
 	if slot.addressedTime == (time.Time{}) {
 		glog.Infof("Attachment got no address: attachment=%s/%s, VNI=%06x, node=%s\n", nsName, slot.currentAttachmentName, VNI, slot.currentNodeName)
 	} else if slot.readyTime == (time.Time{}) && slot.brokenTime == (time.Time{}) {
 		glog.Infof("Attachment got no state: attachment=%s/%s, VNI=%06x, node=%s\n", nsName, slot.currentAttachmentName, VNI, slot.currentNodeName)
-	} else if slot.readyTime != (time.Time{}) && slot.testedTime == (time.Time{}) && !*omitTest {
+	} else if slot.readyTime != (time.Time{}) && slot.testedTime == (time.Time{}) && *testFraction > 0 {
 		glog.Infof("Attachment test did not complete: attachment=%s/%s, VNI=%06x, node=%s\n", nsName, slot.currentAttachmentName, VNI, slot.currentNodeName)
 	}
 	return slot.natt
@@ -648,8 +613,7 @@ var lawBias = flag.Int("bias", 0, "bias in power law")
 var justCount = flag.Bool("estimate", false, "only characterize the network size distribution")
 var roundRobin = flag.Bool("round-robin", false, "pick Nodes round-robin")
 var singleNetwork = flag.Bool("single-network", false, "indicates whether to make only one Subnet in each VirtNet")
-var omitTest = flag.Bool("omit-test", false, "indicates whether to avoid functional testing of the created attachments")
-var testFraction = flag.Float64("test-fraction", 0.1, "fraction of non-initial attachments that are tested")
+var testFraction = flag.Float64("test-fraction", 0.1, "fraction of non-initial attachments that are tested; set it to 0 to avoid testing altogether")
 var pendingWait = flag.Duration("pending-wait", time.Minute, "max time a thread will wait for a pending attachment to become ready")
 var pingCount = flag.Int("ping-count", 10, "number of ping requests in a full test")
 var stopOnPingFail = flag.Bool("stop-on-ping-fail", true, "stop driving as soon as one ping test fails")
@@ -713,10 +677,6 @@ func main() {
 	if *opsDistribution != steadyDistribution && *opsDistribution != poissonDistribution {
 		glog.Errorf("Got unknown distribution \"%s\" for attachments ops, only \"%s\" and \"%s\" are supported.", *opsDistribution, steadyDistribution, poissonDistribution)
 		os.Exit(6)
-	}
-
-	if *omitTest {
-		*testFraction = 0
 	}
 
 	glog.Warningf("Driver GitCommit=%q; parameters: numNets=%d, topNetSize=%d, subnetSizeFactor=%g, lawPower=%g, lawBias=%d, justCount=%v, roundRobin=%v, pendingWait=%s, testFraction=%v, pingCount=%v, stopOnPingFail=%v, singleNetwork=%v, kubeconfigPath=%q, numAttachments=%d, threads=%d, targetRate=%g, attachmentsOpsDistribution=%s, waitAfterCreate=%s, waitAfterDelete=%s, onlyNode=%q, nodeLabelSelector=%q, runID=%q\n", version.GitCommit, *numNets, *topNetSize, *subnetSizeFactor, *lawPower, *lawBias, *justCount, *roundRobin, *pendingWait, *testFraction, *pingCount, *stopOnPingFail, *singleNetwork, *kubeconfigPath, *numAttachments, *threads, *targetRate, *opsDistribution, *waitAfterCreate, *waitAfterDelete, *onlyNode, *nodeLabelSelector, *runID)
@@ -881,19 +841,17 @@ func main() {
 		}
 	}
 	distributionOutlineCSVFile.Close()
-	nneI := int(sizeSum)
+	numSlots := int(sizeSum)
 	avgPeers := squareSum / sizeSum
-	glog.Warningf("VirtNet size distribution: numSlots=%d, avgPeers=%g, breakPoint=%d\n", nneI, avgPeers, breakPoint)
+	glog.Warningf("VirtNet size distribution: numSlots=%d, avgPeers=%g, breakPoint=%d\n", numSlots, avgPeers, breakPoint)
 
 	if *justCount {
 		return
 	}
 
-	if *waitAfterCreate != 0 {
-		if *numAttachments > nneI {
-			glog.Errorf("Requested too many attachments, can not create them all without deleting: numSlots=%d, numAttachments=%d\n", nneI, *numAttachments)
-			os.Exit(27)
-		}
+	if *waitAfterCreate != 0 && *numAttachments > numSlots {
+		glog.Errorf("Requested too many attachments, can not create them all without deleting: numSlots=%d, numAttachments=%d\n", numSlots, *numAttachments)
+		os.Exit(27)
 	}
 
 	createLatencyHistogram = NewTrackingHistogram(
@@ -903,70 +861,7 @@ func main() {
 			Name:        "attachment_create_latency_seconds",
 			Help:        "Latency from start to return from call to create NetworkAttachment",
 			Buckets:     []float64{-1, 0, 0.0625, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 8, 16, 32},
-			ConstLabels: map[string]string{"runID": *runID},
-		})
-	createToAddressedHistogram = NewTrackingHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   HistogramNamespace,
-			Subsystem:   HistogramSubsystem,
-			Name:        "attachment_create_to_addressed_latency_seconds",
-			Help:        "Latency from start of create call to notification of address",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256},
-			ConstLabels: map[string]string{"runID": *runID},
-		})
-	createToReadyHistogram = NewTrackingHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   HistogramNamespace,
-			Subsystem:   HistogramSubsystem,
-			Name:        "attachment_create_to_ready_latency_seconds",
-			Help:        "Latency from start of create call to notification of Ready",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512},
-			ConstLabels: map[string]string{"runID": *runID},
-		})
-	createToBrokenHistogram = NewTrackingHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   HistogramNamespace,
-			Subsystem:   HistogramSubsystem,
-			Name:        "attachment_create_to_broken_latency_seconds",
-			Help:        "Latency from start of create call to notification of broken",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512},
-			ConstLabels: map[string]string{"runID": *runID},
-		})
-	createToHalfTestedHistogram = NewTrackingHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   HistogramNamespace,
-			Subsystem:   HistogramSubsystem,
-			Name:        "attachment_create_to_half_tested_latency_seconds",
-			Help:        "Latency from start of create call to completion of half test",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512},
-			ConstLabels: map[string]string{"runID": *runID},
-		})
-	readyToHalfTestedHistogram = NewTrackingHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   HistogramNamespace,
-			Subsystem:   HistogramSubsystem,
-			Name:        "attachment_ready_to_half_tested_latency_seconds",
-			Help:        "Latency from readiness to completion of half test",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 128, 256},
-			ConstLabels: map[string]string{"runID": *runID},
-		})
-	createToTestedHistogram = NewTrackingHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   HistogramNamespace,
-			Subsystem:   HistogramSubsystem,
-			Name:        "attachment_create_to_tested_latency_seconds",
-			Help:        "Latency from start of create call to completion of full test",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512},
-			ConstLabels: map[string]string{"runID": *runID},
-		})
-	readyToTestedHistogram = NewTrackingHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   HistogramNamespace,
-			Subsystem:   HistogramSubsystem,
-			Name:        "attachment_ready_to_tested_latency_seconds",
-			Help:        "Latency from readiness to completion of full test",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 128, 256},
-			ConstLabels: map[string]string{"runID": *runID},
+			ConstLabels: map[string]string{runIDLabel: *runID},
 		})
 	deleteLatencyHistogram = NewTrackingHistogram(
 		prometheus.HistogramOpts{
@@ -974,8 +869,8 @@ func main() {
 			Subsystem:   HistogramSubsystem,
 			Name:        "attachment_delete_latency_seconds",
 			Help:        "Latency from start to return from call to delete NetworkAttachment",
-			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 8, 16, 32},
-			ConstLabels: map[string]string{"runID": *runID},
+			Buckets:     []float64{-1, 0, 0.0625, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 8, 16, 32},
+			ConstLabels: map[string]string{runIDLabel: *runID},
 		})
 	testCounts = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -983,7 +878,7 @@ func main() {
 			Subsystem:   HistogramSubsystem,
 			Name:        "test_count",
 			Help:        "Count of tests, by exit status, floor(log_base_2(complaints)), and full",
-			ConstLabels: map[string]string{"runID": *runID},
+			ConstLabels: map[string]string{runIDLabel: *runID},
 		},
 		[]string{esLabel, lgComplaintsLabel, fullLabel})
 	successfulCreates = prometheus.NewCounter(
@@ -992,7 +887,7 @@ func main() {
 			Subsystem:   HistogramSubsystem,
 			Name:        "successful_creates",
 			Help:        "Number of successful attempts to create a NetworkAttachment",
-			ConstLabels: map[string]string{"runID": *runID},
+			ConstLabels: map[string]string{runIDLabel: *runID},
 		})
 	failedCreates = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -1000,7 +895,7 @@ func main() {
 			Subsystem:   HistogramSubsystem,
 			Name:        "failed_creates",
 			Help:        "Number of failed attempts to create a NetworkAttachment",
-			ConstLabels: map[string]string{"runID": *runID},
+			ConstLabels: map[string]string{runIDLabel: *runID},
 		})
 	successfulDeletes = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -1008,7 +903,7 @@ func main() {
 			Subsystem:   HistogramSubsystem,
 			Name:        "successful_deletes",
 			Help:        "Number of successful attempts to delete a NetworkAttachment",
-			ConstLabels: map[string]string{"runID": *runID},
+			ConstLabels: map[string]string{runIDLabel: *runID},
 		})
 	failedDeletes = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -1016,21 +911,134 @@ func main() {
 			Subsystem:   HistogramSubsystem,
 			Name:        "failed_deletes",
 			Help:        "Number of failed attempts to delete a NetworkAttachment",
-			ConstLabels: map[string]string{"runID": *runID},
+			ConstLabels: map[string]string{runIDLabel: *runID},
 		})
+	prometheus.MustRegister(createLatencyHistogram,
+		deleteLatencyHistogram,
+		testCounts,
+		successfulCreates,
+		failedCreates,
+		successfulDeletes,
+		failedDeletes)
 
-	prometheus.MustRegister(createLatencyHistogram, deleteLatencyHistogram,
-		createToAddressedHistogram, createToReadyHistogram,
-		createToBrokenHistogram,
-		createToHalfTestedHistogram, readyToHalfTestedHistogram,
-		createToTestedHistogram, readyToTestedHistogram, testCounts,
-		successfulCreates, failedCreates, successfulDeletes, failedDeletes)
+	var (
+		waitedForF        = netv1a1.WaitedForFalse.String()
+		waitedForT        = netv1a1.WaitedForTrue.String()
+		waitedForU        = netv1a1.WaitedForUnknown.String()
+		waitForIPAMLabels = []prometheus.Labels{
+			{
+				naWaitedForIPAMLabel: waitedForF,
+			},
+			{
+				naWaitedForIPAMLabel: waitedForT,
+			},
+		}
+		waitForIPAMAndCALabels = []prometheus.Labels{
+			{
+				naWaitedForIPAMLabel: waitedForT,
+				naWaitedForCALabel:   waitedForT,
+			},
+			{
+				naWaitedForIPAMLabel: waitedForT,
+				naWaitedForCALabel:   waitedForF,
+			},
+			{
+				naWaitedForIPAMLabel: waitedForF,
+				naWaitedForCALabel:   waitedForT,
+			},
+			{
+				naWaitedForIPAMLabel: waitedForF,
+				naWaitedForCALabel:   waitedForF,
+			},
+			// In case the IPAM controller writes an error in a NA's status, the
+			// NA's final state will have the status.waitedForIPAM field set,
+			// while status.waitedForCA will be uninitialized (i.e. "unkown").
+			{
+				naWaitedForIPAMLabel: waitedForF,
+				naWaitedForCALabel:   waitedForU,
+			},
+			{
+				naWaitedForIPAMLabel: waitedForT,
+				naWaitedForCALabel:   waitedForU,
+			},
+		}
+	)
+	createToAddressedHistograms = NewTrackingHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   HistogramNamespace,
+			Subsystem:   HistogramSubsystem,
+			Name:        "attachment_create_to_addressed_latency_seconds",
+			Help:        "Latency from start of create call to notification of address",
+			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256},
+			ConstLabels: map[string]string{runIDLabel: *runID},
+		}, waitForIPAMLabels)
+	prometheus.MustRegister(createToAddressedHistograms.List()...)
+	createToReadyHistograms = NewTrackingHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   HistogramNamespace,
+			Subsystem:   HistogramSubsystem,
+			Name:        "attachment_create_to_ready_latency_seconds",
+			Help:        "Latency from start of create call to notification of Ready",
+			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512},
+			ConstLabels: map[string]string{runIDLabel: *runID},
+		}, waitForIPAMAndCALabels)
+	prometheus.MustRegister(createToReadyHistograms.List()...)
+	createToBrokenHistograms = NewTrackingHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   HistogramNamespace,
+			Subsystem:   HistogramSubsystem,
+			Name:        "attachment_create_to_broken_latency_seconds",
+			Help:        "Latency from start of create call to notification of broken",
+			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512},
+			ConstLabels: map[string]string{runIDLabel: *runID},
+		}, waitForIPAMAndCALabels)
+	prometheus.MustRegister(createToBrokenHistograms.List()...)
+	createToHalfTestedHistograms = NewTrackingHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   HistogramNamespace,
+			Subsystem:   HistogramSubsystem,
+			Name:        "attachment_create_to_half_tested_latency_seconds",
+			Help:        "Latency from start of create call to completion of half test",
+			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512},
+			ConstLabels: map[string]string{runIDLabel: *runID},
+		}, waitForIPAMAndCALabels)
+	prometheus.MustRegister(createToHalfTestedHistograms.List()...)
+	readyToHalfTestedHistograms = NewTrackingHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   HistogramNamespace,
+			Subsystem:   HistogramSubsystem,
+			Name:        "attachment_ready_to_half_tested_latency_seconds",
+			Help:        "Latency from readiness to completion of half test",
+			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 128, 256},
+			ConstLabels: map[string]string{runIDLabel: *runID},
+		}, waitForIPAMAndCALabels)
+	prometheus.MustRegister(readyToHalfTestedHistograms.List()...)
+	createToTestedHistograms = NewTrackingHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   HistogramNamespace,
+			Subsystem:   HistogramSubsystem,
+			Name:        "attachment_create_to_tested_latency_seconds",
+			Help:        "Latency from start of create call to completion of full test",
+			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512},
+			ConstLabels: map[string]string{runIDLabel: *runID},
+		}, waitForIPAMAndCALabels)
+	prometheus.MustRegister(createToTestedHistograms.List()...)
+	readyToTestedHistograms = NewTrackingHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   HistogramNamespace,
+			Subsystem:   HistogramSubsystem,
+			Name:        "attachment_ready_to_tested_latency_seconds",
+			Help:        "Latency from readiness to completion of full test",
+			Buckets:     []float64{-1, 0, 0.125, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 16, 24, 32, 48, 64, 128, 256},
+			ConstLabels: map[string]string{runIDLabel: *runID},
+		}, waitForIPAMAndCALabels)
+	prometheus.MustRegister(readyToTestedHistograms.List()...)
 
-	if *threads > uint64(nneI) {
+	if *threads > uint64(numSlots) {
 		glog.Warningln("Reduced number of threads to match number of attachment slots")
-		*threads = uint64(nneI)
+		*threads = uint64(numSlots)
 	}
-	vnAttachments = make([]VirtNetAttachment, nneI)
+	vnAttachments = make([]VirtNetAttachment, numSlots)
 	k := 0
 	for i := 0; i < *numNets; i++ {
 		for j := 0; j < virtNets[i].size; j++ {
@@ -1083,7 +1091,7 @@ func main() {
 
 	var wg sync.WaitGroup
 	opPeriod := 1 / *targetRate
-	effN := nneI
+	effN := numSlots
 	if effN > *numAttachments {
 		effN = *numAttachments
 	}
@@ -1132,13 +1140,13 @@ func main() {
 	}
 	saveProMetrics(promapi.Config{"http://localhost" + MetricsAddr, nil}, outputDir)
 	createLatencyHistogram.DumpToLog()
-	createToAddressedHistogram.DumpToLog()
-	createToReadyHistogram.DumpToLog()
-	createToBrokenHistogram.DumpToLog()
-	createToHalfTestedHistogram.DumpToLog()
-	readyToHalfTestedHistogram.DumpToLog()
-	createToTestedHistogram.DumpToLog()
-	readyToTestedHistogram.DumpToLog()
+	createToAddressedHistograms.DumpToLog()
+	createToReadyHistograms.DumpToLog()
+	createToBrokenHistograms.DumpToLog()
+	createToHalfTestedHistograms.DumpToLog()
+	readyToHalfTestedHistograms.DumpToLog()
+	createToTestedHistograms.DumpToLog()
+	readyToTestedHistograms.DumpToLog()
 	deleteLatencyHistogram.DumpToLog()
 	glog.Warningf("Address checks: multiOwnerWarnings=%d\n", multiOwnerWarnings)
 	fmt.Println()
@@ -1188,22 +1196,22 @@ func RunThread(kClientset *kosclientset.Clientset, stopCh <-chan struct{}, work 
 	attachmentsDirect := kClientset.NetworkV1alpha1().NetworkAttachments(theKubeNS)
 	createAllowed := true
 	for iDelete < numAttsToCreate {
+		var nextOpIdx uint64
+		if iCreate+iDelete < regularStrides {
+			nextOpIdx = (iCreate+iDelete)*numThreads + thd - 1
+		} else {
+			nextOpIdx = regularStrides*numThreads + ((iCreate+iDelete)-regularStrides)*shortStride + thd - 1
+		}
+		dt := opsTimes[nextOpIdx]
 		hadToWait := false
 		for {
-			var nextOpIdx uint64
-			if iCreate+iDelete < regularStrides {
-				nextOpIdx = (iCreate+iDelete)*numThreads + thd - 1
-			} else {
-				nextOpIdx = regularStrides*numThreads + ((iCreate+iDelete)-regularStrides)*shortStride + thd - 1
-			}
-			dt := opsTimes[nextOpIdx]
-			xd := atomic.AddInt64(&xtraDelayI, 0)
+			xd := atomic.LoadInt64(&xtraDelayI)
 			targt := tbase.Add(time.Duration(int64(dt) + xd))
 			gap := targt.Sub(time.Now())
 			if gap <= 0 {
 				if gap < 0 && !hadToWait {
 					lateOps++
-					opsDelay = -gap
+					opsDelay -= gap
 				}
 				break
 			}

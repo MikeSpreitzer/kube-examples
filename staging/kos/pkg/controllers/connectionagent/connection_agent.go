@@ -92,6 +92,36 @@ const (
 	// The namespace and subsystem of the Prometheus metrics produced here
 	metricsNamespace = "kos"
 	metricsSubsystem = "agent"
+
+	// Prometheus scrape interval.
+	scrapeInterval = 10 * time.Second
+
+	// Prometheus labels used to diversify the metrics that record latencies
+	// from NA creation to local and remote implementation. Metrics are
+	// partitioned on the basis of whether the NA had to wait to be implemented
+	// and on the reason behind the wait. More precisely, both local and remote
+	// NAs metrics are partitioned on whether the NA was created before the IPAM
+	// controller started and on whether the NA became ready (i.e. all the
+	// needed spec and status fields are set) before the local CA started. In
+	// addition, remote NAs metrics are partitioned on whether (1) and (2) are
+	// true, where:
+	// (1) the NA's virtual network became relevant (first local NA was created)
+	//     on the remote node before the remote NA became ready.
+	// (1) the CA on the remote node started after the NA became ready and the
+	//     NA's virtual network became relevant on the remote node.
+	naWaitedForIPAMLabel          = "waited_for_ipam"
+	naWaitedForLocalCALabel       = "waited_for_local_ca"
+	naReadyBeforeVNRelevanceLabel = "ready_before_vn_relevance"
+	remoteCAStartedLastLabel      = "remote_ca_started_last"
+
+	// Other Prometheus labels.
+	errLabel          = "err"
+	statusErrLabel    = "statusErr"
+	opLabel           = "op"
+	whatLabel         = "what"
+	exitStatusLabel   = "exitStatus"
+	lgComplaintsLabel = "lgComplaints"
+	netFabricLabel    = "fabric"
 )
 
 // stage1VirtualNetworkState is the first stage of the state associated with a
@@ -106,9 +136,18 @@ type stage1VirtualNetworkState struct {
 	// processing.
 	remoteAttsLister koslisterv1a1.NetworkAttachmentNamespaceLister
 
-	// The time at which the virtual network became relevant. Used to compute
-	// Promtheus latencies.
-	relevanceTime time.Time
+	// relevanceTime is the nominal time at which the virtual network became
+	// relevant. It is used to compute Prometheus metrics and it is the time at
+	// which the first local NetwokAttachment in the virtual network that is
+	// processed received a virtual IP address. The real time at which the
+	// virtual network became relevant is the earliest time at which a local
+	// NetworkAttachment in the virtual network received a virtual IP address.
+	// Because NetworkAttachments are processed in no specific order,
+	// relevanceTime might be later than the real relevance time. In such cases,
+	// the delay is recorded in relevanceDelaySecs as soon as the real relevance
+	// time is discovered.
+	relevanceTime      time.Time
+	relevanceDelaySecs float64
 }
 
 // stage1VirtualNetworksState is the first stage of the state associated with
@@ -216,6 +255,7 @@ type ConnectionAgent struct {
 	workers       int
 	netFabric     netfabric.InterfaceManager
 	stopCh        <-chan struct{}
+	startTime     time.Time
 
 	// Informer and lister on NetworkAttachments on the same node as the
 	// connection agent.
@@ -251,20 +291,24 @@ type ConnectionAgent struct {
 	// slice to exec post-create or -delete.
 	allowedPrograms map[string]struct{}
 
-	// NetworkAttachment.CreationTimestamp to local network interface creation latency
-	attachmentCreateToLocalIfcHistogram prometheus.Histogram
+	// Latency from attachment creation to local network interface creation
+	attachmentCreateToLocalIfcHistograms *prometheus.HistogramVec
 
-	// NetworkAttachment.CreationTimestamp to remote network interface creation latency
-	attachmentCreateToRemoteIfcHistogram prometheus.Histogram
+	// Latency from attachment creation to remote network interface creation
+	attachmentCreateToRemoteIfcHistograms *prometheus.HistogramVec
 
 	// NASectionImpl to remote network interface creation latency
-	localImplToRemoteIfcHistogram prometheus.Histogram
+	localImplToRemoteIfcHistograms *prometheus.HistogramVec
+
+	// Sum over all relevant virtual networks of the delays of their recorded
+	// relevance time.
+	vnRelevanceAggregateDelay prometheus.Gauge
 
 	// Durations of calls on network fabric
 	fabricLatencyHistograms *prometheus.HistogramVec
 
-	// NetworkAttachment.CreationTimestamp to return from status update
-	attachmentCreateToStatusHistogram prometheus.Histogram
+	// Latency from attachment creation to return from status update
+	attachmentCreateToStatusHistograms *prometheus.HistogramVec
 
 	// round trip time for happy status update
 	attachmentStatusHistograms *prometheus.HistogramVec
@@ -287,31 +331,52 @@ func New(node string,
 	netFabric netfabric.InterfaceManager,
 	allowedPrograms map[string]struct{}) *ConnectionAgent {
 
-	attachmentCreateToLocalIfcHistogram := prometheus.NewHistogram(
+	attachmentCreateToLocalIfcHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace:   metricsNamespace,
 			Subsystem:   metricsSubsystem,
 			Name:        "attachment_create_to_local_ifc_latency_seconds",
-			Help:        "Seconds from attachment CreationTimestamp to finished creating local interface",
+			Help:        "Seconds from attachment creation to finished creating local interface",
 			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256},
 			ConstLabels: map[string]string{"node": node},
-		})
-	attachmentCreateToRemoteIfcHistogram := prometheus.NewHistogram(
+		},
+		[]string{naWaitedForIPAMLabel, naWaitedForLocalCALabel})
+	attachmentCreateToStatusHistograms := prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace:   metricsNamespace,
+			Subsystem:   metricsSubsystem,
+			Name:        "attachment_create_to_status_latency_seconds",
+			Help:        "Seconds from attachment creation to return from successful status update",
+			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256},
+			ConstLabels: map[string]string{"node": node},
+		},
+		[]string{naWaitedForIPAMLabel, naWaitedForLocalCALabel})
+	attachmentCreateToRemoteIfcHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace:   metricsNamespace,
 			Subsystem:   metricsSubsystem,
 			Name:        "attachment_create_to_remote_ifc_latency_seconds",
-			Help:        "Seconds from attachment CreationTimestamp to finished creating remote interface",
+			Help:        "Seconds from attachment creation to finished creating remote interface",
 			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256},
 			ConstLabels: map[string]string{"node": node},
-		})
-	localImplToRemoteIfcHistogram := prometheus.NewHistogram(
+		},
+		[]string{naWaitedForIPAMLabel, naWaitedForLocalCALabel, remoteCAStartedLastLabel, naReadyBeforeVNRelevanceLabel})
+	localImplToRemoteIfcHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace:   metricsNamespace,
 			Subsystem:   metricsSubsystem,
 			Name:        "attachment_impl_to_remote_ifc_latency_seconds",
 			Help:        "Seconds from attachment NASectionImpl Timestamp to finished creating remote interface",
 			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256},
+			ConstLabels: map[string]string{"node": node},
+		},
+		[]string{naWaitedForIPAMLabel, naWaitedForLocalCALabel, remoteCAStartedLastLabel, naReadyBeforeVNRelevanceLabel})
+	vnRelevanceAggregateDelay := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace:   metricsNamespace,
+			Subsystem:   metricsSubsystem,
+			Name:        "vn_relevance_aggregate_delay_seconds",
+			Help:        "Sum over all relevant virtual networks of the delays of their recorded relevance times",
 			ConstLabels: map[string]string{"node": node},
 		})
 	fabricLatencyHistograms := prometheus.NewHistogramVec(
@@ -323,16 +388,7 @@ func New(node string,
 			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16},
 			ConstLabels: map[string]string{"node": node},
 		},
-		[]string{"op", "err"})
-	attachmentCreateToStatusHistogram := prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Namespace:   metricsNamespace,
-			Subsystem:   metricsSubsystem,
-			Name:        "attachment_create_to_status_latency_seconds",
-			Help:        "Seconds from attachment CreationTimestamp to return from successful status update",
-			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256},
-			ConstLabels: map[string]string{"node": node},
-		})
+		[]string{opLabel, errLabel})
 	attachmentStatusHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace:   metricsNamespace,
@@ -342,7 +398,7 @@ func New(node string,
 			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256},
 			ConstLabels: map[string]string{"node": node},
 		},
-		[]string{"statusErr", "err"})
+		[]string{statusErrLabel, errLabel})
 	localAttachmentsGauge := prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace:   metricsNamespace,
@@ -368,7 +424,7 @@ func New(node string,
 			Buckets:     []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256},
 			ConstLabels: map[string]string{"node": node},
 		},
-		[]string{"what", "exitStatus", "lgComplaints"})
+		[]string{whatLabel, exitStatusLabel, lgComplaintsLabel})
 	attachmentExecStatusCounts := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace:   metricsNamespace,
@@ -377,7 +433,7 @@ func New(node string,
 			Help:        "Counts of commands by what, exit status, and floor(log_base_2(complaints))",
 			ConstLabels: map[string]string{"node": node},
 		},
-		[]string{"what", "exitStatus", "lgComplaints"})
+		[]string{whatLabel, exitStatusLabel, lgComplaintsLabel})
 	fabricNameCounts := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace:   metricsNamespace,
@@ -386,7 +442,7 @@ func New(node string,
 			Help:        "Indicator of chosen fabric implementation",
 			ConstLabels: map[string]string{"node": node},
 		},
-		[]string{"fabric"})
+		[]string{netFabricLabel})
 	workerCount := prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace:   metricsNamespace,
@@ -403,9 +459,10 @@ func New(node string,
 			Help:        "Version indicator",
 			ConstLabels: map[string]string{"git_commit": version.GitCommit},
 		})
-	prometheus.MustRegister(attachmentCreateToLocalIfcHistogram, attachmentCreateToRemoteIfcHistogram, localImplToRemoteIfcHistogram, fabricLatencyHistograms, attachmentCreateToStatusHistogram, attachmentStatusHistograms, localAttachmentsGauge, remoteAttachmentsGauge, attachmentExecDurationHistograms, attachmentExecStatusCounts, fabricNameCounts, workerCount, versionCount)
+	initBurstyHistograms(attachmentCreateToLocalIfcHistograms, attachmentCreateToStatusHistograms, attachmentCreateToRemoteIfcHistograms, localImplToRemoteIfcHistograms)
+	prometheus.MustRegister(attachmentCreateToLocalIfcHistograms, attachmentCreateToRemoteIfcHistograms, localImplToRemoteIfcHistograms, vnRelevanceAggregateDelay, fabricLatencyHistograms, attachmentCreateToStatusHistograms, attachmentStatusHistograms, localAttachmentsGauge, remoteAttachmentsGauge, attachmentExecDurationHistograms, attachmentExecStatusCounts, fabricNameCounts, workerCount, versionCount)
 
-	fabricNameCounts.With(prometheus.Labels{"fabric": netFabric.Name()}).Inc()
+	fabricNameCounts.With(prometheus.Labels{netFabricLabel: netFabric.Name()}).Inc()
 	workerCount.Add(float64(workers))
 	versionCount.Add(1)
 
@@ -431,19 +488,169 @@ func New(node string,
 			localAttToStage2VNI: make(map[k8stypes.NamespacedName]uint32),
 			vniToVNState:        make(map[uint32]*stage2VirtualNetworkState),
 		},
-		attToNetworkInterface:                make(map[k8stypes.NamespacedName]networkInterface),
-		allowedPrograms:                      allowedPrograms,
-		attachmentCreateToLocalIfcHistogram:  attachmentCreateToLocalIfcHistogram,
-		attachmentCreateToRemoteIfcHistogram: attachmentCreateToRemoteIfcHistogram,
-		localImplToRemoteIfcHistogram:        localImplToRemoteIfcHistogram,
-		fabricLatencyHistograms:              fabricLatencyHistograms,
-		attachmentCreateToStatusHistogram:    attachmentCreateToStatusHistogram,
-		attachmentStatusHistograms:           attachmentStatusHistograms,
-		localAttachmentsGauge:                localAttachmentsGauge,
-		remoteAttachmentsGauge:               remoteAttachmentsGauge,
-		attachmentExecDurationHistograms:     attachmentExecDurationHistograms,
-		attachmentExecStatusCounts:           attachmentExecStatusCounts,
+		attToNetworkInterface:                 make(map[k8stypes.NamespacedName]networkInterface),
+		allowedPrograms:                       allowedPrograms,
+		attachmentCreateToLocalIfcHistograms:  attachmentCreateToLocalIfcHistograms,
+		attachmentCreateToRemoteIfcHistograms: attachmentCreateToRemoteIfcHistograms,
+		localImplToRemoteIfcHistograms:        localImplToRemoteIfcHistograms,
+		vnRelevanceAggregateDelay:             vnRelevanceAggregateDelay,
+		fabricLatencyHistograms:               fabricLatencyHistograms,
+		attachmentCreateToStatusHistograms:    attachmentCreateToStatusHistograms,
+		attachmentStatusHistograms:            attachmentStatusHistograms,
+		localAttachmentsGauge:                 localAttachmentsGauge,
+		remoteAttachmentsGauge:                remoteAttachmentsGauge,
+		attachmentExecDurationHistograms:      attachmentExecDurationHistograms,
+		attachmentExecStatusCounts:            attachmentExecStatusCounts,
 	}
+}
+
+// Initialize (invoke .With(labels)) those histograms that are part of an
+// histogram vector and are bursty. Typically all the observations for these
+// histograms take place during a single, short burst. If we don't initialize
+// them ASAP, the burst might take place between scrapes, hence the first time
+// Prometheus sees the histograms they already have their final values, which
+// means rate() will compute 0 and histogram_quantile() will completely miss the
+// changes.
+// Notice that most of such bursty histograms would see observations only if
+// there are rare events such as failures, which means that if it wasn't for
+// this function they would never be defined. Considering that they do get
+// defined for every CA, this choice might challenge Prometheus scalability.
+// For consistency, histograms that are part of the input histogram vectors but
+// are not bursty are initialized as well. This is not a scalability issue
+// because these non-bursty histograms represent the most common path, hence
+// they would probably get defined anyway.
+func initBurstyHistograms(attCreateToLocalIfcHistograms,
+	attCreateToStatusHistograms,
+	attCreateToRemoteIfcHistograms,
+	localImplToRemoteIfcHistograms *prometheus.HistogramVec) {
+
+	initLocalAttsHistograms(attCreateToLocalIfcHistograms)
+	initLocalAttsHistograms(attCreateToStatusHistograms)
+
+	initRemoteAttsHistograms(attCreateToRemoteIfcHistograms)
+	initRemoteAttsHistograms(localImplToRemoteIfcHistograms)
+}
+
+func initLocalAttsHistograms(hs *prometheus.HistogramVec) {
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:    "true",
+		naWaitedForLocalCALabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:    "false",
+		naWaitedForLocalCALabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:    "true",
+		naWaitedForLocalCALabel: "false",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:    "false",
+		naWaitedForLocalCALabel: "false",
+	})
+}
+
+func initRemoteAttsHistograms(hs *prometheus.HistogramVec) {
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
+
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
+
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "true",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "true",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "true",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "true",
+	})
+
+	hs.With(prometheus.Labels{
+		naWaitedForIPAMLabel:          "false",
+		naWaitedForLocalCALabel:       "false",
+		remoteCAStartedLastLabel:      "false",
+		naReadyBeforeVNRelevanceLabel: "false",
+	})
 }
 
 // Run activates the ConnectionAgent: the local attachments informer is started,
@@ -456,6 +663,7 @@ func (ca *ConnectionAgent) Run(stopCh <-chan struct{}) error {
 	ca.stopCh = stopCh
 
 	ca.initLocalAttsInformerAndLister()
+	ca.startTime = time.Now()
 	go ca.localAttsInformer.Run(stopCh)
 	klog.V(2).Infoln("Local NetworkAttachments informer started")
 
@@ -474,6 +682,11 @@ func (ca *ConnectionAgent) Run(stopCh <-chan struct{}) error {
 	go func() {
 		klog.Errorf("In-process HTTP server crashed: %s", http.ListenAndServe(metricsAddr, nil).Error())
 	}()
+
+	// Wait longer than the Prometheus scrape interval so that bursty metrics
+	// are scraped before they reach their final values (otherwise PromQL's
+	// rate() will miss their changes).
+	time.Sleep(scrapeInterval + time.Second)
 
 	for i := 0; i < ca.workers; i++ {
 		go k8swait.Until(ca.processQueue, time.Second, stopCh)
@@ -580,7 +793,7 @@ func (ca *ConnectionAgent) startRemoteAttsInformers() error {
 		// arrive causing its deletion and the attachments which were not added
 		// (such as `att`) will be processed and added to a new S2VNState with
 		// the most recent namespace.
-		ca.addLocalAttToS2VNState(parse.AttNSN(att), att.Status.AddressVNI)
+		ca.addLocalAttToS2VNState(parse.AttNSN(att), att.Status.AddressVNI, att.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Time(), true)
 		s2VNState := ca.s2VirtNetsState.vniToVNState[att.Status.AddressVNI]
 		if !s2VNState.remoteAttsInformer.HasSynced() && !k8scache.WaitForCacheSync(s2VNState.remoteAttsInformerStopCh, s2VNState.remoteAttsInformer.HasSynced) {
 			return fmt.Errorf("failed to sync remote attachments informer for VNI %#x", att.Status.AddressVNI)
@@ -716,11 +929,12 @@ func (ca *ConnectionAgent) processNetworkAttachment(attNSN k8stypes.NamespacedNa
 	localIfc := ifc.(*localNetworkInterface)
 	ifcMAC := localIfc.GuestMAC.String()
 	ifcPCER, _ := localIfc.postCreateExecReport.Load().(*netv1a1.ExecReport)
-	if ca.localAttachmentIsUpToDate(att, ifcMAC, localIfc.Name, statusErrs, ifcPCER) {
+	waitedForCA := netv1a1.BuildWaitedForStatus(att.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Time(), ca.startTime)
+	if ca.localAttachmentIsUpToDate(att, ifcMAC, localIfc.Name, waitedForCA, statusErrs, ifcPCER) {
 		return nil
 	}
 
-	return ca.updateLocalAttachmentStatus(att, ifcMAC, localIfc.Name, statusErrs, ifcPCER)
+	return ca.updateLocalAttachmentStatus(att, ifcMAC, localIfc.Name, waitedForCA, statusErrs, ifcPCER)
 }
 
 // getNetworkAttachment attempts to determine the univocal version of the
@@ -807,7 +1021,7 @@ func (ca *ConnectionAgent) syncS2VNState(attNSN k8stypes.NamespacedName, att *ne
 	if att != nil && ca.node == att.Spec.Node && (!attOldStage2VNIFound || attOldStage2VNI != att.Status.AddressVNI) {
 		// The NetworkAttachment is local and is not in the
 		// stage2VirtualNetworkState of its virtual network yet: add it.
-		return ca.addLocalAttToS2VNState(attNSN, att.Status.AddressVNI)
+		return ca.addLocalAttToS2VNState(attNSN, att.Status.AddressVNI, att.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Time(), false)
 	}
 
 	return nil
@@ -817,12 +1031,12 @@ func (ca *ConnectionAgent) syncS2VNState(attNSN k8stypes.NamespacedName, att *ne
 // stage2VirtualNetworkState and inits such state if the NetworkAttachment is
 // the first local one (this entails initializing the stage1VirtualNetworkState
 // as well).
-func (ca *ConnectionAgent) addLocalAttToS2VNState(att k8stypes.NamespacedName, vni uint32) error {
-	attS2VNState := ca.s2VirtNetsState.vniToVNState[vni]
-	if attS2VNState == nil {
+func (ca *ConnectionAgent) addLocalAttToS2VNState(att k8stypes.NamespacedName, vni uint32, addressedTime time.Time, initialSync bool) error {
+	attS2VNState, foundS2VNState := ca.s2VirtNetsState.vniToVNState[vni]
+	if !foundS2VNState {
 		// The NetworkAttachment is the first local one for its virtual network,
 		// which has therefore just become relevant.
-		attS2VNState = ca.initStage2VNState(vni, att.Namespace)
+		attS2VNState = ca.initStage2VNState(vni, att.Namespace, addressedTime)
 		klog.V(2).Infof("Virtual Network with VNI %d became relevant because of creation of first local attachment %s. Its state has been initialized.", vni, att)
 	}
 
@@ -837,9 +1051,45 @@ func (ca *ConnectionAgent) addLocalAttToS2VNState(att k8stypes.NamespacedName, v
 		return fmt.Errorf("attachment is local but could not be added to stage2VirtualNetworkState because namespace found there (%s) does not match the attachment's", attS2VNState.namespace)
 	}
 
+	if foundS2VNState {
+		ca.touchStage1VNState(att, vni, addressedTime, initialSync)
+	}
+
 	ca.s2VirtNetsState.localAttToStage2VNI[att] = vni
 	attS2VNState.localAtts[att.Name] = struct{}{}
 	return nil
+}
+
+const vnRelevanceDelayGraceSecs = 0.01
+
+func (ca *ConnectionAgent) touchStage1VNState(att k8stypes.NamespacedName, vni uint32, newTime time.Time, pickEarlyTime bool) {
+	ca.s1VirtNetsState.Lock()
+	defer ca.s1VirtNetsState.Unlock()
+
+	s1VNS := ca.s1VirtNetsState.vniToVNState[vni]
+
+	if !newTime.Before(s1VNS.relevanceTime) {
+		return
+	}
+
+	if pickEarlyTime {
+		s1VNS.relevanceTime = newTime
+		return
+	}
+
+	dt := s1VNS.relevanceTime.Sub(newTime).Seconds()
+	if dt > vnRelevanceDelayGraceSecs && dt > s1VNS.relevanceDelaySecs {
+		// Make some noise.
+		klog.Warningf("Recorded relevance time for vni %d is %s but local NetworkAttachment %s was addressed at %s (%f secs earlier).",
+			vni,
+			s1VNS.relevanceTime,
+			att,
+			newTime,
+			dt)
+		ca.vnRelevanceAggregateDelay.Add(dt - s1VNS.relevanceDelaySecs)
+		s1VNS.relevanceDelaySecs = dt
+	}
+
 }
 
 // removeLocalAttFromStage2VNState removes a local NetworkAttachment from its
@@ -865,7 +1115,7 @@ func (ca *ConnectionAgent) removeLocalAttFromS2VNState(att k8stypes.NamespacedNa
 // initStage2VNState configures and starts the Informer for remote
 // NetworkAttachments in the virtual network identified by `vni`.
 // It also initializes the stage1VirtualNetworkState corresponding to `vni`.
-func (ca *ConnectionAgent) initStage2VNState(vni uint32, namespace string) *stage2VirtualNetworkState {
+func (ca *ConnectionAgent) initStage2VNState(vni uint32, namespace string, relevanceTime time.Time) *stage2VirtualNetworkState {
 	remAttsInformer, remAttsLister := ca.newInformerAndLister(resyncPeriod, namespace, ca.remoteAttSelector(vni), attHostIPAndIP)
 	newStage2VNState := &stage2VirtualNetworkState{
 		namespace:                namespace,
@@ -875,7 +1125,7 @@ func (ca *ConnectionAgent) initStage2VNState(vni uint32, namespace string) *stag
 	}
 	ca.s2VirtNetsState.vniToVNState[vni] = newStage2VNState
 
-	s1VNS := ca.initStage1VNState(vni, remAttsLister.NetworkAttachments(namespace))
+	s1VNS := ca.initStage1VNState(vni, remAttsLister.NetworkAttachments(namespace), relevanceTime)
 
 	remAttsInformer.AddEventHandler(ca.newRemoteAttsEventHandler(s1VNS))
 	go remAttsInformer.Run(mergeStopChannels(ca.stopCh, newStage2VNState.remoteAttsInformerStopCh))
@@ -883,14 +1133,14 @@ func (ca *ConnectionAgent) initStage2VNState(vni uint32, namespace string) *stag
 	return newStage2VNState
 }
 
-func (ca *ConnectionAgent) initStage1VNState(vni uint32, remAttsLister koslisterv1a1.NetworkAttachmentNamespaceLister) *stage1VirtualNetworkState {
+func (ca *ConnectionAgent) initStage1VNState(vni uint32, remAttsLister koslisterv1a1.NetworkAttachmentNamespaceLister, relevanceTime time.Time) *stage1VirtualNetworkState {
 	ca.s1VirtNetsState.Lock()
 	defer ca.s1VirtNetsState.Unlock()
 
 	s1VNS := &stage1VirtualNetworkState{
 		remoteAtts:       make(map[string]struct{}),
 		remoteAttsLister: remAttsLister,
-		relevanceTime:    time.Now()}
+		relevanceTime:    relevanceTime}
 	ca.s1VirtNetsState.vniToVNState[vni] = s1VNS
 	return s1VNS
 }
@@ -911,6 +1161,7 @@ func (ca *ConnectionAgent) clearStage1VNState(vni uint32, namespace string) {
 		}
 		ca.queue.Add(aRemoteAttNSN)
 	}
+	ca.vnRelevanceAggregateDelay.Sub(stage1VNState.relevanceDelaySecs)
 }
 
 func (ca *ConnectionAgent) newRemoteAttsEventHandler(s1VNS *stage1VirtualNetworkState) k8scache.ResourceEventHandlerFuncs {
@@ -1043,23 +1294,26 @@ func (ca *ConnectionAgent) syncNetworkInterface(attNSN k8stypes.NamespacedName, 
 	return
 }
 
-func (ca *ConnectionAgent) localAttachmentIsUpToDate(att *netv1a1.NetworkAttachment, macAddr, ifcName string, statusErrs sliceOfString, postCreateER *netv1a1.ExecReport) bool {
+func (ca *ConnectionAgent) localAttachmentIsUpToDate(att *netv1a1.NetworkAttachment, macAddr, ifcName string, waitedForCA netv1a1.WaitedForStatus, statusErrs sliceOfString, postCreateER *netv1a1.ExecReport) bool {
 	return macAddr == att.Status.MACAddress &&
 		ifcName == att.Status.IfcName &&
 		ca.hostIP.String() == att.Status.HostIP &&
+		waitedForCA.Equal(att.Status.WaitedForCA) &&
 		statusErrs.Equal(att.Status.Errors.Host) &&
 		postCreateER.Equiv(att.Status.PostCreateExecReport)
 }
 
-func (ca *ConnectionAgent) updateLocalAttachmentStatus(att *netv1a1.NetworkAttachment, macAddr, ifcName string, statusErrs sliceOfString, pcer *netv1a1.ExecReport) error {
+func (ca *ConnectionAgent) updateLocalAttachmentStatus(att *netv1a1.NetworkAttachment, macAddr, ifcName string, waitedForCA netv1a1.WaitedForStatus, statusErrs sliceOfString, pcer *netv1a1.ExecReport) error {
 	test, _ := ca.localAttsLister.NetworkAttachments(att.Namespace).Get(att.Name)
 	if test == nil { // It has been deleted, don't bother
-		klog.V(3).Infof("Did not attempt to update deleted NetworkAttachment %s's status: oldRV=%s, ipv4=%s, macAddress=%q, ifcName=%q, statusErrs=%#+v, PostCreateExecReport=%#+v",
+		klog.V(3).Infof("Did not attempt to update deleted NetworkAttachment %s's status: oldRV=%s, ipv4=%s, macAddress=%q, ifcName=%q, waitedForIPAM=%s, waitedForCA=%s, statusErrs=%#+v, PostCreateExecReport=%#+v",
 			parse.AttNSN(att),
 			att.ResourceVersion,
 			att.Status.IPv4,
 			macAddr,
 			ifcName,
+			att.Status.WaitedForIPAM,
+			waitedForCA,
 			statusErrs,
 			pcer)
 		return nil
@@ -1067,6 +1321,7 @@ func (ca *ConnectionAgent) updateLocalAttachmentStatus(att *netv1a1.NetworkAttac
 	att2 := att.DeepCopy()
 	att2.Status.MACAddress = macAddr
 	att2.Status.IfcName = ifcName
+	att2.Status.WaitedForCA = waitedForCA
 	att2.Status.HostIP = ca.hostIP.String()
 	att2.Status.Errors.Host = statusErrs
 	att2.Status.PostCreateExecReport = pcer
@@ -1074,10 +1329,10 @@ func (ca *ConnectionAgent) updateLocalAttachmentStatus(att *netv1a1.NetworkAttac
 	updatedAtt, err := ca.netv1a1Ifc.NetworkAttachments(att.Namespace).UpdateStatus(att2)
 	tAfterUpdate := time.Now()
 
-	ca.attachmentStatusHistograms.With(prometheus.Labels{"statusErr": formatErrVal(len(statusErrs) > 0), "err": SummarizeErr(err)}).Observe(tAfterUpdate.Sub(tBeforeUpdate).Seconds())
+	ca.attachmentStatusHistograms.With(prometheus.Labels{statusErrLabel: formatErrVal(len(statusErrs) > 0), errLabel: SummarizeErr(err)}).Observe(tAfterUpdate.Sub(tBeforeUpdate).Seconds())
 
 	if err == nil {
-		klog.V(3).Infof("Updated NetworkAttachment %s's status: oldRV=%s, newRV=%s, ipv4=%s, hostIP=%s, macAddress=%q, ifcName=%q, statusErrs=%#+v, PostCreateExecReport=%#+v",
+		klog.V(3).Infof("Updated NetworkAttachment %s's status: oldRV=%s, newRV=%s, ipv4=%s, hostIP=%s, macAddress=%q, ifcName=%q, waitedForIPAM=%s, waitedForCA=%s, statusErrs=%#+v, PostCreateExecReport=%#+v",
 			parse.AttNSN(att),
 			att.ResourceVersion,
 			updatedAtt.ResourceVersion,
@@ -1085,34 +1340,44 @@ func (ca *ConnectionAgent) updateLocalAttachmentStatus(att *netv1a1.NetworkAttac
 			updatedAtt.Status.HostIP,
 			updatedAtt.Status.MACAddress,
 			updatedAtt.Status.IfcName,
+			updatedAtt.Status.WaitedForIPAM,
+			updatedAtt.Status.WaitedForCA,
 			updatedAtt.Status.Errors.Host,
 			updatedAtt.Status.PostCreateExecReport)
 		if att.Status.HostIP == "" {
-			ca.attachmentCreateToStatusHistogram.Observe(updatedAtt.Writes.GetServerWriteTime(netv1a1.NASectionImpl).Sub(att.Writes.GetServerWriteTime(netv1a1.NASectionSpec)).Seconds())
+			ca.attachmentCreateToStatusHistograms.
+				With(prometheus.Labels{
+					naWaitedForIPAMLabel:    updatedAtt.Status.WaitedForIPAM.String(),
+					naWaitedForLocalCALabel: waitedForCA.String(),
+				}).
+				Observe(updatedAtt.Writes.GetServerWriteTime(netv1a1.NASectionImpl).Sub(att.Writes.GetServerWriteTime(netv1a1.NASectionSpec)).Seconds())
 		}
 		return nil
 	}
 
 	if IsNotFound(err) {
-		klog.V(3).Infof("Could not update deleted NetworkAttachment %s's status: oldRV=%s, newRV=%s, ipv4=%s, hostIP=%s, macAddress=%q, ifcName=%q, statusErrs=%#+v, PostCreateExecReport=%#+v",
+		klog.V(3).Infof("Could not update deleted NetworkAttachment %s's status: oldRV=%s, ipv4=%s, hostIP=%s, macAddress=%q, ifcName=%q, waitedForIPAM=%s, waitedForCA=%s, statusErrs=%#+v, PostCreateExecReport=%#+v",
 			parse.AttNSN(att),
 			att.ResourceVersion,
-			updatedAtt.ResourceVersion,
-			updatedAtt.Status.IPv4,
-			updatedAtt.Status.HostIP,
-			updatedAtt.Status.MACAddress,
-			updatedAtt.Status.IfcName,
-			updatedAtt.Status.Errors.Host,
-			updatedAtt.Status.PostCreateExecReport)
+			att.Status.IPv4,
+			att2.Status.HostIP,
+			att2.Status.MACAddress,
+			att2.Status.IfcName,
+			att.Status.WaitedForIPAM,
+			att2.Status.WaitedForCA,
+			att2.Status.Errors.Host,
+			att2.Status.PostCreateExecReport)
 		return nil
 	}
 
-	return fmt.Errorf("status update with RV=%s, ipv4=%s, hostIP=%s, macAddress=%q, ifcName=%q, statusErrs=%#+v, PostCreateExecReport=%#+v failed: %s",
+	return fmt.Errorf("status update with RV=%s, ipv4=%s, hostIP=%s, macAddress=%q, ifcName=%q, waitedForIPAM=%s, waitedForCA=%s, statusErrs=%#+v, PostCreateExecReport=%#+v failed: %s",
 		att.ResourceVersion,
 		att.Status.IPv4,
 		ca.hostIP,
 		macAddr,
 		ifcName,
+		att.Status.WaitedForIPAM,
+		waitedForCA,
 		statusErrs,
 		pcer,
 		err.Error())

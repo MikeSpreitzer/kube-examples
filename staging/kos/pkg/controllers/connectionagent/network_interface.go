@@ -97,7 +97,7 @@ func (ifc *localNetworkInterface) delete(owner k8stypes.NamespacedName, ca *Conn
 	err := ca.netFabric.DeleteLocalIfc(ifc.LocalNetIfc)
 	tAfter := time.Now()
 
-	ca.fabricLatencyHistograms.With(prometheus.Labels{"op": "DeleteLocalIfc", "err": formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
+	ca.fabricLatencyHistograms.With(prometheus.Labels{opLabel: "DeleteLocalIfc", errLabel: formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
 	if err == nil {
 		ca.localAttachmentsGauge.Dec()
 		ca.launchCommand(owner, ifc.LocalNetIfc, ifc.postDeleteExec, nil, "postDelete", true)
@@ -160,7 +160,7 @@ func (ifc *remoteNetworkInterface) delete(_ k8stypes.NamespacedName, ca *Connect
 	err := ca.netFabric.DeleteRemoteIfc(ifc.RemoteNetIfc)
 	tAfter := time.Now()
 
-	ca.fabricLatencyHistograms.With(prometheus.Labels{"op": "DeleteRemoteIfc", "err": formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
+	ca.fabricLatencyHistograms.With(prometheus.Labels{opLabel: "DeleteRemoteIfc", errLabel: formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
 	if err == nil {
 		ca.remoteAttachmentsGauge.Dec()
 	}
@@ -184,15 +184,25 @@ func (ca *ConnectionAgent) createLocalNetworkInterface(att *netv1a1.NetworkAttac
 	err = ca.netFabric.CreateLocalIfc(ifc.LocalNetIfc)
 	tAfter := time.Now()
 
-	ca.fabricLatencyHistograms.With(prometheus.Labels{"op": "CreateLocalIfc", "err": formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
-	if err == nil {
-		statusErrs = ca.launchCommand(parse.AttNSN(att), ifc.LocalNetIfc, att.Spec.PostCreateExec, ifc.postCreateExecReport.Store, "postCreate", true)
-		if att.Status.IfcName == "" {
-			ca.attachmentCreateToLocalIfcHistogram.Observe(tAfter.Sub(att.Writes.GetServerWriteTime(netv1a1.NASectionSpec).Time()).Seconds())
-		}
-		ca.localAttachmentsGauge.Inc()
-		ca.eventRecorder.Eventf(att, k8scorev1api.EventTypeNormal, "Implemented", "Created Linux network interface named %s with MAC address %s and IPv4 address %s", ifc.Name, ifc.GuestMAC, ifc.GuestIP)
+	ca.fabricLatencyHistograms.With(prometheus.Labels{opLabel: "CreateLocalIfc", errLabel: formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
+
+	if err != nil {
+		return
 	}
+
+	statusErrs = ca.launchCommand(parse.AttNSN(att), ifc.LocalNetIfc, att.Spec.PostCreateExec, ifc.postCreateExecReport.Store, "postCreate", true)
+
+	if att.Status.IfcName == "" {
+		ca.attachmentCreateToLocalIfcHistograms.
+			With(prometheus.Labels{
+				naWaitedForIPAMLabel:    att.Status.WaitedForIPAM.String(),
+				naWaitedForLocalCALabel: netv1a1.BuildWaitedForStatus(att.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Time(), ca.startTime).String(),
+			}).
+			Observe(tAfter.Sub(att.Writes.GetServerWriteTime(netv1a1.NASectionSpec).Time()).Seconds())
+	}
+
+	ca.localAttachmentsGauge.Inc()
+	ca.eventRecorder.Eventf(att, k8scorev1api.EventTypeNormal, "Implemented", "Created Linux network interface named %s with MAC address %s and IPv4 address %s", ifc.Name, ifc.GuestMAC, ifc.GuestIP)
 
 	return
 }
@@ -208,17 +218,32 @@ func (ca *ConnectionAgent) createRemoteNetworkInterface(att *netv1a1.NetworkAtta
 	err := ca.netFabric.CreateRemoteIfc(ifc.RemoteNetIfc)
 	tAfter := time.Now()
 
-	ca.fabricLatencyHistograms.With(prometheus.Labels{"op": "CreateRemoteIfc", "err": formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
+	ca.fabricLatencyHistograms.With(prometheus.Labels{opLabel: "CreateRemoteIfc", errLabel: formatErrVal(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
 	if err == nil {
+		// Record some metrics.
 		naSpecWriteTime := att.Writes.GetServerWriteTime(netv1a1.NASectionSpec).Time()
 		naImplWriteTime := att.Writes.GetServerWriteTime(netv1a1.NASectionImpl).Time()
-		if vnRelevanceTime.Before(naImplWriteTime) {
-			ca.attachmentCreateToRemoteIfcHistogram.Observe(tAfter.Sub(naSpecWriteTime).Seconds())
-			ca.localImplToRemoteIfcHistogram.Observe(tAfter.Sub(naImplWriteTime).Seconds())
-		} else {
-			ca.attachmentCreateToRemoteIfcHistogram.Observe(tAfter.Sub(vnRelevanceTime).Seconds() + naImplWriteTime.Sub(naSpecWriteTime).Seconds())
-			ca.localImplToRemoteIfcHistogram.Observe(tAfter.Sub(vnRelevanceTime).Seconds())
+		pl := prometheus.Labels{
+			naWaitedForIPAMLabel:    att.Status.WaitedForIPAM.String(),
+			naWaitedForLocalCALabel: att.Status.WaitedForCA.String(),
 		}
+		var (
+			attCreateToRemIfcDt float64
+			localImplToRemIfcDt float64
+		)
+		if naImplWriteTime.Before(vnRelevanceTime) {
+			pl[remoteCAStartedLastLabel] = strconv.FormatBool(ca.startTime.After(vnRelevanceTime))
+			pl[naReadyBeforeVNRelevanceLabel] = "true"
+			attCreateToRemIfcDt = tAfter.Sub(vnRelevanceTime).Seconds() + naImplWriteTime.Sub(naSpecWriteTime).Seconds()
+			localImplToRemIfcDt = tAfter.Sub(vnRelevanceTime).Seconds()
+		} else {
+			pl[remoteCAStartedLastLabel] = strconv.FormatBool(ca.startTime.After(naImplWriteTime))
+			pl[naReadyBeforeVNRelevanceLabel] = "false"
+			attCreateToRemIfcDt = tAfter.Sub(naSpecWriteTime).Seconds()
+			localImplToRemIfcDt = tAfter.Sub(naImplWriteTime).Seconds()
+		}
+		ca.attachmentCreateToRemoteIfcHistograms.With(pl).Observe(attCreateToRemIfcDt)
+		ca.localImplToRemoteIfcHistograms.With(pl).Observe(localImplToRemIfcDt)
 		ca.remoteAttachmentsGauge.Inc()
 	}
 

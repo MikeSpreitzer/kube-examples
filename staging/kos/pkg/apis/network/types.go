@@ -330,6 +330,48 @@ type NetworkAttachmentStatus struct {
 	// interface was first created.
 	// +optional
 	PostCreateExecReport *ExecReport
+
+	// Whether the NetworkAttachment was created before the IPAM controller
+	// started. An empty value is equivalent to "unknown".
+	// +optional
+	WaitedForIPAM WaitedForStatus
+
+	// Whether `IPv4` was set before the Connection Agent on `spec.Node`
+	// started. An empty value is equivalent to "unknown".
+	// +optional
+	WaitedForCA WaitedForStatus
+}
+
+type WaitedForStatus string
+
+const (
+	WaitedForTrue  WaitedForStatus = "true"
+	WaitedForFalse WaitedForStatus = "false"
+	// equivalent to ""
+	WaitedForUnknown WaitedForStatus = "unknown"
+)
+
+func (w WaitedForStatus) String() string {
+	if w == "" {
+		return string(WaitedForUnknown)
+	}
+	return string(w)
+}
+
+func (w1 WaitedForStatus) Equal(w2 WaitedForStatus) bool {
+	if w1 == w2 ||
+		w1 == WaitedForUnknown && w2 == "" ||
+		w1 == "" && w2 == WaitedForUnknown {
+		return true
+	}
+	return false
+}
+
+func BuildWaitedForStatus(waiter, event time.Time) WaitedForStatus {
+	if waiter.Before(event) {
+		return WaitedForTrue
+	}
+	return WaitedForFalse
 }
 
 type NetworkAttachmentErrors struct {

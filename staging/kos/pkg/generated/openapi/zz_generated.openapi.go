@@ -2880,6 +2880,20 @@ func schema_pkg_apis_network_v1alpha1_NetworkAttachmentStatus(ref common.Referen
 							Ref:         ref("k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ExecReport"),
 						},
 					},
+					"waitedForIPAM": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Whether the NetworkAttachment was created before the IPAM controller started. An empty value is equivalent to \"unknown\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"waitedForCA": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Whether `IPv4` was set before the Connection Agent on `spec.Node` started. An empty value is equivalent to \"unknown\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},

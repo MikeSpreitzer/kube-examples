@@ -63,6 +63,12 @@ const (
 
 	metricsNamespace = "kos"
 	metricsSubsystem = "ipam"
+
+	// Prometheus metrics labels.
+	naWaitedForIPAMLabel = "waited_for_ipam"
+	opLabel              = "op"
+	errLabel             = "err"
+	statusErrLabel       = "statusErr"
 )
 
 type IPAMController struct {
@@ -80,15 +86,16 @@ type IPAMController struct {
 	atts           map[k8stypes.NamespacedName]*NetworkAttachmentData
 	addrCacheMutex sync.Mutex
 	addrCache      map[uint32]uint32set.UInt32SetChooser
+	startTime      time.Time
 
-	// IPLock.CreationTimestamp - NetworkAttachment.CreationTimestamp
-	attachmentCreateToLockHistogram prometheus.Histogram
+	// Latency from attachment creation to IPLock creation
+	attachmentCreateToLockHistograms *prometheus.HistogramVec
 
 	// round trip time to create an IPLock object
 	lockOpHistograms *prometheus.HistogramVec
 
-	// Attachment ObjectMeta.CreationTimestamp to return from status update
-	attachmentCreateToAddressHistogram prometheus.Histogram
+	// Latency from attachment creation to return from successful status update
+	attachmentCreateToStatusUpdateHistograms *prometheus.HistogramVec
 
 	// round trip time to update attachment status
 	attachmentUpdateHistograms *prometheus.HistogramVec
@@ -130,14 +137,26 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 	workers int,
 	hostname string) *IPAMController {
 
-	attachmentCreateToLockHistogram := prometheus.NewHistogram(
+	attachmentCreateToLockHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "attachment_create_to_lock_latency_seconds",
-			Help:      "Latency from Attachment CreationTimestamp to IPLock CreationTimestamp, in seconds",
+			Help:      "Seconds from Attachment creation to IPLock creation",
 			Buckets:   []float64{-1, 0, 0.125, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64},
-		})
+		},
+		[]string{naWaitedForIPAMLabel})
+	// Init the histogram with naWaitedForIPAMLabel="true" because it's likely
+	// that all of its observations take place during a very short burst shortly
+	// after the IPAM starts up. If the first scrape takes place after the burst,
+	// PromQL rate() will only see the histogram after all of the observations and
+	// compute 0.
+	attachmentCreateToLockHistograms.With(prometheus.Labels{
+		naWaitedForIPAMLabel: "true",
+	})
+	attachmentCreateToLockHistograms.With(prometheus.Labels{
+		naWaitedForIPAMLabel: "false",
+	})
 
 	lockOpHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -147,19 +166,45 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 			Help:      "Round trip latency to create/delete IPLock object, in seconds",
 			Buckets:   []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64},
 		},
-		[]string{"op", "err"})
+		[]string{opLabel, errLabel})
 	errValF := FmtErrBool(false)
-	lockOpHistograms.With(prometheus.Labels{"op": opCreate, "err": errValF})
-	lockOpHistograms.With(prometheus.Labels{"op": opDelete, "err": errValF})
+	lockOpHistograms.With(prometheus.Labels{opLabel: opCreate, errLabel: errValF})
+	lockOpHistograms.With(prometheus.Labels{opLabel: opDelete, errLabel: errValF})
 
-	attachmentCreateToAddressHistogram := prometheus.NewHistogram(
+	attachmentCreateToStatusUpdateHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "attachment_create_to_address_latency_seconds",
-			Help:      "Latency from attachment CreationTimestamp to return from status update, in seconds",
+			Name:      "attachment_create_to_status_update_latency_seconds",
+			Help:      "Seconds from attachment creation to return from successful status update",
 			Buckets:   []float64{-1, 0, 0.125, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64},
-		})
+		},
+		[]string{statusErrLabel, naWaitedForIPAMLabel})
+	errValT := FmtErrBool(true)
+	// Init histograms for which naWaitedForIPAMLabel=true because all of their
+	// observations take place during a single, short burst. If we don't
+	// initialize them ASAP, the burst might take place between scrapes, hence
+	// the first time Prometheus sees the histograms they already have their
+	// final values, which means rate() will compute 0 and histogram_quantile()
+	// will completely miss the changes.
+	// For consistency, histograms that are part of the histogram vector but
+	// are not bursty (naWaitedForIPAMLabel=false) are initialized as well.
+	attachmentCreateToStatusUpdateHistograms.With(prometheus.Labels{
+		statusErrLabel:       errValT,
+		naWaitedForIPAMLabel: "true",
+	})
+	attachmentCreateToStatusUpdateHistograms.With(prometheus.Labels{
+		statusErrLabel:       errValF,
+		naWaitedForIPAMLabel: "true",
+	})
+	attachmentCreateToStatusUpdateHistograms.With(prometheus.Labels{
+		statusErrLabel:       errValT,
+		naWaitedForIPAMLabel: "false",
+	})
+	attachmentCreateToStatusUpdateHistograms.With(prometheus.Labels{
+		statusErrLabel:       errValF,
+		naWaitedForIPAMLabel: "false",
+	})
 
 	attachmentUpdateHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -169,8 +214,8 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 			Help:      "Round trip latency to set attachment address, in seconds",
 			Buckets:   []float64{-0.125, 0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64},
 		},
-		[]string{"statusErr", "err"})
-	attachmentUpdateHistograms.With(prometheus.Labels{"statusErr": errValF, "err": errValF})
+		[]string{statusErrLabel, errLabel})
+	attachmentUpdateHistograms.With(prometheus.Labels{statusErrLabel: errValF, errLabel: errValF})
 
 	anticipationUsedHistogram := prometheus.NewHistogram(
 		prometheus.HistogramOpts{
@@ -207,7 +252,7 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 			ConstLabels: map[string]string{"git_commit": version.GitCommit},
 		})
 
-	prometheus.MustRegister(attachmentCreateToLockHistogram, lockOpHistograms, attachmentCreateToAddressHistogram, attachmentUpdateHistograms, anticipationUsedHistogram, statusUsedHistogram, workerCount, versionCount)
+	prometheus.MustRegister(attachmentCreateToLockHistograms, lockOpHistograms, attachmentCreateToStatusUpdateHistograms, attachmentUpdateHistograms, anticipationUsedHistogram, statusUsedHistogram, workerCount, versionCount)
 
 	workerCount.Add(float64(workers))
 	versionCount.Add(1)
@@ -221,24 +266,24 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 	lockInformer.AddIndexers(map[string]k8scache.IndexFunc{owningAttachmentIdxName: OwningAttachments})
 
 	return &IPAMController{
-		netIfc:                             netIfc,
-		subnetInformer:                     subnetInformer,
-		subnetLister:                       subnetLister,
-		netattInformer:                     netattInformer,
-		netattLister:                       netattLister,
-		lockInformer:                       lockInformer,
-		lockLister:                         lockLister,
-		eventRecorder:                      eventRecorder,
-		queue:                              queue,
-		workers:                            workers,
-		atts:                               make(map[k8stypes.NamespacedName]*NetworkAttachmentData),
-		addrCache:                          make(map[uint32]uint32set.UInt32SetChooser),
-		attachmentCreateToLockHistogram:    attachmentCreateToLockHistogram,
-		lockOpHistograms:                   lockOpHistograms,
-		attachmentCreateToAddressHistogram: attachmentCreateToAddressHistogram,
-		attachmentUpdateHistograms:         attachmentUpdateHistograms,
-		anticipationUsedHistogram:          anticipationUsedHistogram,
-		statusUsedHistogram:                statusUsedHistogram,
+		netIfc:                                   netIfc,
+		subnetInformer:                           subnetInformer,
+		subnetLister:                             subnetLister,
+		netattInformer:                           netattInformer,
+		netattLister:                             netattLister,
+		lockInformer:                             lockInformer,
+		lockLister:                               lockLister,
+		eventRecorder:                            eventRecorder,
+		queue:                                    queue,
+		workers:                                  workers,
+		atts:                                     make(map[k8stypes.NamespacedName]*NetworkAttachmentData),
+		addrCache:                                make(map[uint32]uint32set.UInt32SetChooser),
+		attachmentCreateToLockHistograms:         attachmentCreateToLockHistograms,
+		lockOpHistograms:                         lockOpHistograms,
+		attachmentCreateToStatusUpdateHistograms: attachmentCreateToStatusUpdateHistograms,
+		attachmentUpdateHistograms:               attachmentUpdateHistograms,
+		anticipationUsedHistogram:                anticipationUsedHistogram,
+		statusUsedHistogram:                      statusUsedHistogram,
 	}
 }
 
@@ -261,6 +306,8 @@ func (ctlr *IPAMController) Run(stopCh <-chan struct{}) error {
 		ctlr.OnLockCreate,
 		ctlr.OnLockUpdate,
 		ctlr.OnLockDelete})
+
+	ctlr.startTime = time.Now()
 
 	if !k8scache.WaitForCacheSync(stopCh, ctlr.subnetInformer.HasSynced, ctlr.lockInformer.HasSynced, ctlr.netattInformer.HasSynced) {
 		return errors.New("informers' caches failed to sync")
@@ -670,7 +717,7 @@ func (ctlr *IPAMController) deleteIPLockObject(parsed ParsedLock) error {
 	tBefore := time.Now()
 	err := lockOps.Delete(parsed.name, &delOpts)
 	tAfter := time.Now()
-	ctlr.lockOpHistograms.With(prometheus.Labels{"op": opDelete, "err": FmtErrBool(err != nil && !k8serrors.IsNotFound(err))}).Observe(tAfter.Sub(tBefore).Seconds())
+	ctlr.lockOpHistograms.With(prometheus.Labels{opLabel: opDelete, errLabel: FmtErrBool(err != nil && !k8serrors.IsNotFound(err))}).Observe(tAfter.Sub(tBefore).Seconds())
 	if err == nil {
 		klog.V(4).Infof("Deleted IPLock %s/%s=%s", parsed.ns, parsed.name, string(parsed.UID))
 	} else if k8serrors.IsNotFound(err) {
@@ -720,12 +767,17 @@ func (ctlr *IPAMController) pickAndLockAddress(ns, name string, att *netv1a1.Net
 		tBefore := time.Now()
 		ipl2, err = lockOps.Create(ipl)
 		tAfter := time.Now()
-		ctlr.lockOpHistograms.With(prometheus.Labels{"op": opCreate, "err": FmtErrBool(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
+		ctlr.lockOpHistograms.With(prometheus.Labels{opLabel: opCreate, errLabel: FmtErrBool(err != nil)}).Observe(tAfter.Sub(tBefore).Seconds())
 		if err == nil {
 			ctlr.eventRecorder.Eventf(att, k8scorev1api.EventTypeNormal, "AddressAssigned", "Assigned IPv4 address %s", ipForStatus)
 			klog.V(4).Infof("Locked IP address %s for %s/%s=%s, lockName=%s, lockUID=%s, Status.IPv4 was %q", ipForStatus, ns, name, string(att.UID), lockName, string(ipl2.UID), att.Status.IPv4)
 			if len(att.Status.IPv4) == 0 {
-				ctlr.attachmentCreateToLockHistogram.Observe(ipl2.Writes.GetServerWriteTime(netv1a1.IPLockSectionSpec).Sub(att.Writes.GetServerWriteTime(netv1a1.NASectionSpec)).Seconds())
+				attCreationTs := att.Writes.GetServerWriteTime(netv1a1.NASectionSpec)
+				ctlr.attachmentCreateToLockHistograms.
+					With(prometheus.Labels{
+						naWaitedForIPAMLabel: strconv.FormatBool(attCreationTs.Time().Before(ctlr.startTime)),
+					}).
+					Observe(ipl2.Writes.GetServerWriteTime(netv1a1.IPLockSectionSpec).Sub(attCreationTs).Seconds())
 			}
 			break
 		} else if k8serrors.IsAlreadyExists(err) {
@@ -789,23 +841,30 @@ func (ctlr *IPAMController) updateNAStatus(ns, name string, att *netv1a1.Network
 	} else {
 		att2.Status.IPv4 = ipForStatus.String()
 	}
+	attCreationTs := att.Writes.GetServerWriteTime(netv1a1.NASectionSpec)
+	att2.Status.WaitedForIPAM = netv1a1.BuildWaitedForStatus(attCreationTs.Time(), ctlr.startTime)
 	attachmentOps := ctlr.netIfc.NetworkAttachments(ns)
 	tBefore := time.Now()
 	att3, err := attachmentOps.UpdateStatus(att2)
 	tAfter := time.Now()
-	ctlr.attachmentUpdateHistograms.With(prometheus.Labels{"statusErr": FmtErrBool(len(statusErrs) > 0), "err": SummarizeErr(err)}).Observe(tAfter.Sub(tBefore).Seconds())
+	ctlr.attachmentUpdateHistograms.With(prometheus.Labels{statusErrLabel: FmtErrBool(len(statusErrs) > 0), errLabel: SummarizeErr(err)}).Observe(tAfter.Sub(tBefore).Seconds())
 	if err == nil {
-		deltaS := att3.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Sub(att.Writes.GetServerWriteTime(netv1a1.NASectionSpec)).Seconds()
-		ctlr.attachmentCreateToAddressHistogram.Observe(deltaS)
+		pl := prometheus.Labels{
+			naWaitedForIPAMLabel: att3.Status.WaitedForIPAM.String(),
+		}
+		deltaS := att3.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Sub(attCreationTs).Seconds()
 		if len(statusErrs) > 0 {
 			klog.V(4).Infof("Recorded errors %v in status of %s/%s, subnetUID=%s, old ResourceVersion=%s, new ResourceVersion=%s, deltaS=%v", statusErrs, ns, name, subnetUID, att.ResourceVersion, att3.ResourceVersion, deltaS)
+			pl[statusErrLabel] = "err"
 		} else {
 			klog.V(4).Infof("Recorded locked address %s in status of %s/%s, subnetUID=%s, old ResourceVersion=%s, new ResourceVersion=%s, deltaS=%v", ipForStatus, ns, name, subnetUID, att.ResourceVersion, att3.ResourceVersion, deltaS)
 			nadat.anticipatingResourceVersion = att.ResourceVersion
 			nadat.anticipatedResourceVersion = att3.ResourceVersion
 			nadat.anticipationSubnetUID = subnetUID
 			nadat.anticipatedIPv4 = ipForStatus
+			pl[statusErrLabel] = "ok"
 		}
+		ctlr.attachmentCreateToStatusUpdateHistograms.With(pl).Observe(deltaS)
 		return nil
 	}
 	errMsg := fmt.Sprintf("Failed to write into status of NetworkAttachment %s/%s", ns, name)

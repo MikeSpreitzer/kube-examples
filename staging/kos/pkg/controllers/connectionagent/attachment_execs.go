@@ -108,8 +108,8 @@ func (c *ConnectionAgent) runCommand(attNSN k8stypes.NamespacedName, ifc netfabr
 	}
 	exitStatusStr := strconv.FormatInt(int64(cr.ExitStatus), 10)
 	lgComplaintsStr := strconv.FormatInt(int64(bits.Len(complaints)-1), 10)
-	c.attachmentExecDurationHistograms.With(prometheus.Labels{"what": what, "exitStatus": exitStatusStr, "lgComplaints": lgComplaintsStr}).Observe(stopTime.Sub(startTime).Seconds())
-	c.attachmentExecStatusCounts.With(prometheus.Labels{"what": what, "exitStatus": exitStatusStr, "lgComplaints": lgComplaintsStr}).Inc()
+	c.attachmentExecDurationHistograms.With(prometheus.Labels{whatLabel: what, exitStatusLabel: exitStatusStr, lgComplaintsLabel: lgComplaintsStr}).Observe(stopTime.Sub(startTime).Seconds())
+	c.attachmentExecStatusCounts.With(prometheus.Labels{whatLabel: what, exitStatusLabel: exitStatusStr, lgComplaintsLabel: lgComplaintsStr}).Inc()
 	klog.V(4).Infof("Exec report: att=%s, vni=%06x, ipv4=%s, ifcName=%s, mac=%s, what=%s, report=%#+v", attNSN, ifc.VNI, ifc.GuestIP, ifc.Name, ifc.GuestMAC, what, cr)
 	if setExecReport != nil {
 		setExecReport(cr)

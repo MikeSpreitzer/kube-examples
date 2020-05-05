@@ -48,6 +48,9 @@ const (
 
 	// The HTTP path under which the scraping endpoint ("/metrics") is served.
 	metricsPath = "/metrics"
+
+	// Prometheus scrape interval.
+	scrapeInterval = 10 * time.Second
 )
 
 func main() {
@@ -105,6 +108,11 @@ func main() {
 	go func() {
 		klog.Errorf("In-process HTTP server crashed: %s", http.ListenAndServe(metricsAddr, nil).Error())
 	}()
+
+	// Wait longer than the Prometheus scrape interval so that bursty metrics
+	// are scraped before they reach their final values (otherwise PromQL's
+	// rate() will miss their changes).
+	time.Sleep(scrapeInterval + time.Second)
 
 	ctx.sharedInformers.Start(ctx.stop)
 	klog.V(2).Info("Informers started.")
