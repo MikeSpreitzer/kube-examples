@@ -99,7 +99,7 @@ func (networkattachmentStrategy) PrepareForUpdate(ctx context.Context, obj, old 
 	oldNA := old.(*network.NetworkAttachment)
 	newNA := obj.(*network.NetworkAttachment)
 	newNA.Status = oldNA.Status
-	newNA.ExtendedObjectMeta = oldNA.ExtendedObjectMeta
+	newNA.ExtendedObjectMeta.Writes = oldNA.ExtendedObjectMeta.Writes
 	// ValidateUpdate insists that the only Spec field that can change is PostDeleteExec
 	if !SliceOfStringEqual(oldNA.Spec.PostDeleteExec, newNA.Spec.PostDeleteExec) {
 		now := network.Now()
@@ -121,7 +121,8 @@ func SliceOfStringEqual(x, y []string) bool {
 }
 
 func (networkattachmentStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	na := obj.(*network.NetworkAttachment)
+	return apimachineryvalidation.ValidateObjectMeta(&na.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
 }
 
 func (networkattachmentStrategy) AllowCreateOnUpdate() bool {
@@ -136,16 +137,19 @@ func (networkattachmentStrategy) Canonicalize(obj runtime.Object) {
 }
 
 func (networkattachmentStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	var errs field.ErrorList
+	newNA, oldNA := obj.(*network.NetworkAttachment), old.(*network.NetworkAttachment)
+
+	errs := apimachineryvalidation.ValidateObjectMeta(&newNA.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
+	errs = append(errs, newNA.ExtendedObjectMeta.Validate()...)
+
 	immutableFieldMsg := "attempt to update immutable field"
-	newNa, oldNa := obj.(*network.NetworkAttachment), old.(*network.NetworkAttachment)
-	if newNa.Spec.Node != oldNa.Spec.Node {
+	if newNA.Spec.Node != oldNA.Spec.Node {
 		errs = append(errs, field.Forbidden(field.NewPath("spec", "node"), immutableFieldMsg))
 	}
-	if newNa.Spec.Subnet != oldNa.Spec.Subnet {
+	if newNA.Spec.Subnet != oldNA.Spec.Subnet {
 		errs = append(errs, field.Forbidden(field.NewPath("spec", "subnet"), immutableFieldMsg))
 	}
-	if !SliceOfStringEqual(newNa.Spec.PostCreateExec, oldNa.Spec.PostCreateExec) {
+	if !SliceOfStringEqual(newNA.Spec.PostCreateExec, oldNA.Spec.PostCreateExec) {
 		errs = append(errs, field.Forbidden(field.NewPath("spec", "postCreateExec"), immutableFieldMsg))
 	}
 	return errs
@@ -166,13 +170,12 @@ func (networkattachmentStatusStrategy) PrepareForUpdate(ctx context.Context, obj
 	oldNA := old.(*network.NetworkAttachment)
 	// update is not allowed to set spec
 	newNA.Spec = oldNA.Spec
-	newNA.ExtendedObjectMeta = oldNA.ExtendedObjectMeta
+	newNA.ExtendedObjectMeta.Writes = oldNA.ExtendedObjectMeta.Writes
 	now := network.Now()
 	if oldNA.Status.LockUID != newNA.Status.LockUID ||
 		oldNA.Status.AddressVNI != newNA.Status.AddressVNI ||
 		oldNA.Status.IPv4 != newNA.Status.IPv4 ||
 		oldNA.Status.AddressContention != newNA.Status.AddressContention ||
-		!(&oldNA.Status.SubnetCreationTime).Equal(&newNA.Status.SubnetCreationTime) ||
 		!SliceOfStringEqual(oldNA.Status.Errors.IPAM, newNA.Status.Errors.IPAM) {
 		newNA.Writes = newNA.Writes.SetWrite(network.NASectionAddr, now)
 	}
@@ -186,6 +189,6 @@ func (networkattachmentStatusStrategy) PrepareForUpdate(ctx context.Context, obj
 
 func (networkattachmentStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	na := obj.(*network.NetworkAttachment)
-	allErrs := apimachineryvalidation.ValidateObjectMeta(&na.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
-	return allErrs
+	errs := apimachineryvalidation.ValidateObjectMeta(&na.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
+	return append(errs, na.ExtendedObjectMeta.Validate()...)
 }

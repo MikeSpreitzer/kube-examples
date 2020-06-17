@@ -174,7 +174,7 @@ func (ifc *remoteNetworkInterface) String() string {
 	return fmt.Sprintf("{type=remote, VNI=%06x, guestIP=%s, guestMAC=%s, hostIP=%s}", ifc.VNI, ifc.GuestIP, ifc.GuestMAC, ifc.HostIP)
 }
 
-func (ca *ConnectionAgent) createLocalNetworkInterface(att *netv1a1.NetworkAttachment, lastClientWrite string, lastClientWriteTime time.Time) (ifc *localNetworkInterface, statusErrs sliceOfString, err error) {
+func (ca *ConnectionAgent) createLocalNetworkInterface(att *netv1a1.NetworkAttachment) (ifc *localNetworkInterface, statusErrs sliceOfString, err error) {
 	ifc = &localNetworkInterface{}
 	ifc.VNI = att.Status.AddressVNI
 	ifc.GuestIP = gonet.ParseIP(att.Status.IPv4)
@@ -194,16 +194,28 @@ func (ca *ConnectionAgent) createLocalNetworkInterface(att *netv1a1.NetworkAttac
 	}
 	statusErrs = ca.launchCommand(parse.AttNSN(att), ifc.LocalNetIfc, att.Spec.PostCreateExec, ifc.postCreateExecReport.Store, "postCreate", true)
 	if att.Status.IfcName == "" {
+		lastClientWrName := att.LastClientWrite.Name
+		lastClientWrTime := att.LastClientWrite.Time.Time
+
 		ca.lastClientWriteToLocalIfcHistograms.
-			WithLabelValues(lastClientWrite).
-			Observe(tAfter.Sub(lastClientWriteTime).Seconds())
+			WithLabelValues(lastClientWrName).
+			Observe(tAfter.Sub(lastClientWrTime).Seconds())
+
+		if ca.startTime.After(att.LastControllerStart.ControllerTime.Time) {
+			localIfcDelayDueToDowntimeSecs := ca.startTime.Sub(lastClientWrTime).Seconds()
+			if localIfcDelayDueToDowntimeSecs > 0 {
+				ca.localIfcDelayDueToDowntimeHistograms.
+					WithLabelValues(lastClientWrName).
+					Observe(localIfcDelayDueToDowntimeSecs)
+			}
+		}
 	}
 	ca.localAttachmentsGauge.Inc()
 	ca.eventRecorder.Eventf(att, k8scorev1api.EventTypeNormal, "Implemented", "Created Linux network interface named %s with MAC address %s and IPv4 address %s", ifc.Name, ifc.GuestMAC, ifc.GuestIP)
 	return
 }
 
-func (ca *ConnectionAgent) createRemoteNetworkInterface(att *netv1a1.NetworkAttachment, lastClientWrite string, lastClientWriteTime time.Time) (*remoteNetworkInterface, error) {
+func (ca *ConnectionAgent) createRemoteNetworkInterface(att *netv1a1.NetworkAttachment, vnRelevanceTrigger string, vnRelevanceTime time.Time) (*remoteNetworkInterface, error) {
 	ifc := &remoteNetworkInterface{}
 	ifc.VNI = att.Status.AddressVNI
 	ifc.GuestIP = gonet.ParseIP(att.Status.IPv4)
@@ -222,14 +234,40 @@ func (ca *ConnectionAgent) createRemoteNetworkInterface(att *netv1a1.NetworkAtta
 		return nil, err
 	}
 
-	ca.lastClientWriteToRemoteIfcHistograms.
-		WithLabelValues(lastClientWrite).
-		Observe(tAfter.Sub(lastClientWriteTime).Seconds())
-	if lastClientWrite == naLastClientWrite || lastClientWrite == subnetLastClientWrite {
+	lastClientWrName := att.LastClientWrite.Name
+	lastClientWrTime := att.LastClientWrite.Time.Time
+	lastCAStartLabelValue := ""
+	remoteIfcDelayDueToDowntimeSecs := float64(0)
+
+	if lastClientWrTime.Before(vnRelevanceTime) {
+		lastClientWrName = vnRelevanceTrigger + vnRelevanceTriggerLabelSuffix
+		lastClientWrTime = vnRelevanceTime
+
+		if att.LastControllerStart.Controller == netv1a1.LCAControllerStart && ca.startTime.Before(att.LastControllerStart.ControllerTime.Time) {
+			lastCAStartLabelValue = localCAStartLabelValue
+			remoteIfcDelayDueToDowntimeSecs = att.LastControllerStart.ControllerTime.Sub(lastClientWrTime).Seconds()
+		}
+	} else {
 		ca.localImplToRemoteIfcHistograms.
-			WithLabelValues(lastClientWrite).
+			WithLabelValues(lastClientWrName).
 			Observe(tAfter.Sub(att.Writes.GetServerWriteTimeUnwrapped(netv1a1.NASectionImpl)).Seconds())
+
+		if ca.startTime.After(att.LastControllerStart.ControllerTime.Time) {
+			lastCAStartLabelValue = remoteCAStartLabelValue
+			remoteIfcDelayDueToDowntimeSecs = ca.startTime.Sub(lastClientWrTime).Seconds()
+		}
 	}
+
+	ca.lastClientWriteToRemoteIfcHistograms.
+		WithLabelValues(lastClientWrName).
+		Observe(tAfter.Sub(lastClientWrTime).Seconds())
+
+	if remoteIfcDelayDueToDowntimeSecs > 0 {
+		ca.remoteIfcDelayDueToDowntimeHistograms.
+			WithLabelValues(lastClientWrName, lastCAStartLabelValue).
+			Observe(remoteIfcDelayDueToDowntimeSecs)
+	}
+
 	ca.remoteAttachmentsGauge.Inc()
 
 	return ifc, nil

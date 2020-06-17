@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -83,10 +84,14 @@ func (iplockStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) 
 }
 
 func (iplockStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
+	newIPL := obj.(*network.IPLock)
+	oldIPL := old.(*network.IPLock)
+	newIPL.ExtendedObjectMeta.Writes = oldIPL.ExtendedObjectMeta.Writes
 }
 
 func (iplockStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	ipl := obj.(*network.IPLock)
+	return apimachineryvalidation.ValidateObjectMeta(&ipl.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
 }
 
 func (iplockStrategy) AllowCreateOnUpdate() bool {
@@ -101,5 +106,7 @@ func (iplockStrategy) Canonicalize(obj runtime.Object) {
 }
 
 func (iplockStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	ipl := obj.(*network.IPLock)
+	errs := apimachineryvalidation.ValidateObjectMeta(&ipl.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
+	return append(errs, ipl.ExtendedObjectMeta.Validate()...)
 }
