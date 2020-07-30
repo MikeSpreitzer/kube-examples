@@ -566,20 +566,54 @@ func parseOFport(ofPort string) uint16 {
 }
 
 func (f *ovsFabric) getOFportsToLocalIfcNames() (map[uint16]string, error) {
-	listOFportsAndIfcNames := f.newListOFportsAndIfcNamesCmd()
-
-	out, err := listOFportsAndIfcNames.CombinedOutput()
-	outStr := strings.TrimRight(string(out), "\n")
+	ifcsNames, err := f.getIfcsNames()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list local ifcs names and ofPorts: %s: %s",
-			err.Error(),
-			outStr)
+		return nil, fmt.Errorf("failed to retrieve names of local interfaces on bridge %s: %s",
+			f.bridge,
+			err)
 	}
 
-	klog.V(4).Infof("Parsing OpenFlow ports and Interface names in bridge %s...",
-		f.bridge)
+	// If the only interface in the bridge is the VTEP (which is always present)
+	// we're done.
+	if len(ifcsNames) == 1 {
+		return nil, nil
+	}
 
-	return f.parseOFportsAndIfcNames(outStr), nil
+	ifcsOFPorts, err := f.getIfcsOFPorts(ifcsNames)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve OpenFlow port numbers for local interfaces %s on bridge %s: %s",
+			ifcsNames,
+			f.bridge,
+			err)
+	}
+
+	ofPortToIfcName := make(map[uint16]string, len(ifcsOFPorts)-1)
+	for i, iofp := range ifcsOFPorts {
+		ifcOFPort := parseOFport(iofp)
+		if ifcOFPort != f.vtepOFport {
+			ofPortToIfcName[ifcOFPort] = ifcsNames[i]
+		}
+	}
+
+	return ofPortToIfcName, nil
+}
+
+func (f *ovsFabric) getIfcsNames() ([]string, error) {
+	listIfcsNamesCmd := f.newListIfcsNamesCmd()
+	return parseCmdCombinedOutput(listIfcsNamesCmd.CombinedOutput())
+}
+
+func (f *ovsFabric) getIfcsOFPorts(ifcs []string) ([]string, error) {
+	getIfcsOFPortsCmd := f.newGetIfcsOFPortsCmd(ifcs)
+	return parseCmdCombinedOutput(getIfcsOFPortsCmd.CombinedOutput())
+}
+
+func parseCmdCombinedOutput(cmdCombinedOutput []byte, err error) ([]string, error) {
+	cmdCombinedOutputStr := strings.TrimRight(string(cmdCombinedOutput), "\n")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %s", err, cmdCombinedOutputStr)
+	}
+	return strings.Split(cmdCombinedOutputStr, "\n"), nil
 }
 
 func (f *ovsFabric) getUsefulLocalFlows() ([]string, error) {
@@ -686,41 +720,6 @@ func (f *ovsFabric) deleteIncompleteIfcs(ifcs []string) {
 				anIfc,
 				f.bridge)
 		}
-	}
-}
-
-func (f *ovsFabric) parseOFportsAndIfcNames(ofPortsAndIfcNamesRaw string) map[uint16]string {
-	ofPortsAndIfcNames := strings.Split(ofPortsAndIfcNamesRaw, "\n")
-	ofPortToIfcName := make(map[uint16]string, len(ofPortsAndIfcNames))
-
-	for _, anOFportAndIfcNamePair := range ofPortsAndIfcNames {
-		f.parseOFportAndIfcName(anOFportAndIfcNamePair, ofPortToIfcName)
-	}
-
-	return ofPortToIfcName
-}
-
-func (f *ovsFabric) parseOFportAndIfcName(ofPortAndNameJoined string, ofPortToIfcName map[uint16]string) {
-	klog.V(5).Infof("Parsing OpenFlow port number and interface name pair %s from bridge %s",
-		ofPortAndNameJoined,
-		f.bridge)
-
-	ofPortAndName := strings.Fields(ofPortAndNameJoined)
-
-	// the command that returns interface names for some reason wraps them in
-	// double quotes, hence we need to get rid of them
-	ofPortAndName[1] = strings.Trim(ofPortAndName[1], "\"")
-
-	// TODO this check is not enough. If there's more than one OvS bridge the
-	// interfaces of all bridges are returned, and we might add interfaces which
-	// are not part of the bridge this fabric refers to. Fix this. Investigate
-	// whether there's an OvS cli option to get interface names and ports from a
-	// single bridge. If not think about something else (we could define the
-	// interface name to be of a different type than just strings, that enforces
-	// a certain pattern). Or we could have this fabric set the name rather than
-	// the connection agent.
-	if ofPortAndName[1] != f.vtep && ofPortAndName[1] != f.bridge {
-		ofPortToIfcName[parseOFport(ofPortAndName[0])] = ofPortAndName[1]
 	}
 }
 
@@ -966,15 +965,23 @@ func (f *ovsFabric) newGetFlowsCmd() *exec.Cmd {
 	return exec.Command("ovs-ofctl", "dump-flows", f.bridge)
 }
 
-func (f *ovsFabric) newListOFportsAndIfcNamesCmd() *exec.Cmd {
+func (f *ovsFabric) newListIfcsNamesCmd() *exec.Cmd {
 	return exec.Command("ovs-vsctl",
-		"-f",
-		"table",
-		"--no-heading",
-		"--",
-		"--columns=ofport,name",
-		"list",
-		"Interface")
+		"list-ports",
+		f.bridge)
+}
+
+// newGetIfcOFPortsCmd returns a command that lists all the OpenFlow port
+// numbers associated with the interfaces in `ifcs`.
+// For performance reasons, the command runs within a single OvS transaction (a
+// transaction is the only way to have a single OvS command for all interfaces
+// rather than one separate command per interface).
+func (f *ovsFabric) newGetIfcsOFPortsCmd(ifcs []string) *exec.Cmd {
+	cmdArgs := []string{"get", "interface"}
+	ifcsJoinedForCmd := strings.Join(ifcs, " ofport -- get interface ")
+	cmdArgs = append(cmdArgs, strings.Split(ifcsJoinedForCmd, " ")...)
+	cmdArgs = append(cmdArgs, "ofport")
+	return exec.Command("ovs-vsctl", cmdArgs...)
 }
 
 func (f *ovsFabric) lockVNIIPPair(vni uint32, ip net.IP) (err error) {

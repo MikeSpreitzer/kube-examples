@@ -21,13 +21,6 @@ limitations under the License.
 // The fabric is based on an Open vSwitch (OvS) bridge, which gets configured
 // through OpenFlow.
 //
-//******************************************************************************
-// Currently, THE FABRIC DOES NOT WORK IF ANOTHER OvS BRIDGE EXISTS ON THE NODE.
-// DOES NOT WORK means that its behavior is incorrect and undefined. Until this
-// limitation is removed, users must ensure there's no other OvS bridge on the
-// node.
-//******************************************************************************
-//
 // The fabric constructor's creates the OvS bridge and a Linux network Interface
 // configured to act as a VXLAN Tunnel End Point (VTEP), and connects them
 // together. It also installs some default OpenFlow flows in the bridge.
