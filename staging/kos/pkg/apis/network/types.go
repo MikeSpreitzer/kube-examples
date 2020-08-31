@@ -17,11 +17,9 @@ limitations under the License.
 package network
 
 import (
-	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // ExtendedObjectMeta has extra metadata for an API object.
@@ -44,22 +42,6 @@ type ExtendedObjectMeta struct {
 	// implementing the API object.
 	// +optional
 	LastControllerStart ControllerStart
-}
-
-// Validate returns a list of errors carrying information on why
-// the ExtendedObjectMeta is invalid, or an empty list if the ExtendedObjectMeta
-// is valid.
-func (eom ExtendedObjectMeta) Validate() field.ErrorList {
-	errs := field.ErrorList{}
-	if err := eom.LastClientWrite.Validate(); err != nil {
-		path := field.NewPath("extendedObjectMeta").Child("lastClientWrite")
-		errs = append(errs, field.Invalid(path, eom.LastClientWrite, err.Error()))
-	}
-	if err := eom.LastControllerStart.Validate(); err != nil {
-		path := field.NewPath("extendedObjectMeta").Child("lastControllerStart")
-		errs = append(errs, field.Invalid(path, eom.LastControllerStart, err.Error()))
-	}
-	return errs
 }
 
 // WriteSet represents a map from section to time
@@ -201,11 +183,6 @@ type ClientWrite struct {
 	Time metav1.MicroTime
 }
 
-// Validate checks whether `cw` fields are consistent.
-func (cw ClientWrite) Validate() error {
-	return validateTimedField(cw.Time, cw.Name, "Name")
-}
-
 // ControllerStart carries information on the start of a KOS controller.
 type ControllerStart struct {
 	// Controller is the name of the controller which started.
@@ -214,21 +191,6 @@ type ControllerStart struct {
 	// ControllerTime is the time at which the controller started, as recorded
 	// by the controller itself.
 	ControllerTime metav1.MicroTime
-}
-
-// Validate checks whether `cs` fields are consistent.
-func (cs ControllerStart) Validate() error {
-	return validateTimedField(cs.ControllerTime, cs.Controller, "Controller")
-}
-
-func validateTimedField(time metav1.MicroTime, fieldVal, fieldName string) error {
-	if (time == metav1.MicroTime{} && fieldVal != "") {
-		return fmt.Errorf("both %s and time must be set, but only %s is set", fieldName, fieldName)
-	}
-	if (time != metav1.MicroTime{} && fieldVal == "") {
-		return fmt.Errorf("both %s and time must be set, but only time is set", fieldName)
-	}
-	return nil
 }
 
 const (

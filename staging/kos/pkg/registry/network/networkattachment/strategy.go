@@ -32,6 +32,7 @@ import (
 
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/examples/staging/kos/pkg/apis/network"
+	"k8s.io/examples/staging/kos/pkg/apis/network/helper"
 )
 
 // NewStrategies creates and returns strategy objects for the main
@@ -140,7 +141,7 @@ func (networkattachmentStrategy) ValidateUpdate(ctx context.Context, obj, old ru
 	newNA, oldNA := obj.(*network.NetworkAttachment), old.(*network.NetworkAttachment)
 
 	errs := apimachineryvalidation.ValidateObjectMeta(&newNA.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
-	errs = append(errs, newNA.ExtendedObjectMeta.Validate()...)
+	errs = append(errs, helper.ValidateExtendedObjectMeta(newNA.ExtendedObjectMeta)...)
 
 	immutableFieldMsg := "attempt to update immutable field"
 	if newNA.Spec.Node != oldNA.Spec.Node {
@@ -190,5 +191,5 @@ func (networkattachmentStatusStrategy) PrepareForUpdate(ctx context.Context, obj
 func (networkattachmentStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	na := obj.(*network.NetworkAttachment)
 	errs := apimachineryvalidation.ValidateObjectMeta(&na.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
-	return append(errs, na.ExtendedObjectMeta.Validate()...)
+	return append(errs, helper.ValidateExtendedObjectMeta(na.ExtendedObjectMeta)...)
 }

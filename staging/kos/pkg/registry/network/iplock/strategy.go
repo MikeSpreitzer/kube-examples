@@ -31,6 +31,7 @@ import (
 
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/examples/staging/kos/pkg/apis/network"
+	"k8s.io/examples/staging/kos/pkg/apis/network/helper"
 )
 
 // NewStrategy creates and returns a iplockStrategy instance.
@@ -108,5 +109,5 @@ func (iplockStrategy) Canonicalize(obj runtime.Object) {
 func (iplockStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	ipl := obj.(*network.IPLock)
 	errs := apimachineryvalidation.ValidateObjectMeta(&ipl.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
-	return append(errs, ipl.ExtendedObjectMeta.Validate()...)
+	return append(errs, helper.ValidateExtendedObjectMeta(ipl.ExtendedObjectMeta)...)
 }

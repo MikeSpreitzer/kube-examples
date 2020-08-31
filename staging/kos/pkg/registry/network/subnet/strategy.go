@@ -36,6 +36,7 @@ import (
 	"k8s.io/klog"
 
 	"k8s.io/examples/staging/kos/pkg/apis/network"
+	"k8s.io/examples/staging/kos/pkg/apis/network/helper"
 	"k8s.io/examples/staging/kos/pkg/util/parse/network/subnet"
 )
 
@@ -195,7 +196,7 @@ func (ss *subnetStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.O
 	newS, oldS := obj.(*network.Subnet), old.(*network.Subnet)
 
 	errs := apimachineryvalidation.ValidateObjectMeta(&newS.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
-	errs = append(errs, newS.ExtendedObjectMeta.Validate()...)
+	errs = append(errs, helper.ValidateExtendedObjectMeta(newS.ExtendedObjectMeta)...)
 
 	immutableFieldMsg := "attempt to update immutable field"
 	if newS.Spec.VNI != oldS.Spec.VNI {
@@ -240,5 +241,5 @@ func (subnetStatusStrategy) PrepareForUpdate(ctx context.Context, obj, old runti
 func (subnetStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	subnet := obj.(*network.Subnet)
 	errs := apimachineryvalidation.ValidateObjectMeta(&subnet.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
-	return append(errs, subnet.ExtendedObjectMeta.Validate()...)
+	return append(errs, helper.ValidateExtendedObjectMeta(subnet.ExtendedObjectMeta)...)
 }
