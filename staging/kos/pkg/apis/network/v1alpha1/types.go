@@ -197,9 +197,9 @@ const (
 	SubnetClientWrite = "subnet"
 	NAClientWrite     = "na"
 
-	SVControllerStart   = "subnet_validator"
-	IPAMControllerStart = "ipam_controller"
-	LCAControllerStart  = "local_connection_agent"
+	SubnetValidator      = "subnet_validator"
+	IPAMController       = "ipam_controller"
+	LocalConnectionAgent = "local_connection_agent"
 )
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

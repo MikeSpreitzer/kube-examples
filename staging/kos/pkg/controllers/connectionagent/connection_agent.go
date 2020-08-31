@@ -1027,7 +1027,7 @@ func (ca *ConnectionAgent) touchStage1VNState(att k8stypes.NamespacedName, vni u
 
 	s1VNS := ca.s1VirtNetsState.vniToVNState[vni]
 
-	if newRelevanceTime.After(s1VNS.relevanceTime) {
+	if !newRelevanceTime.Before(s1VNS.relevanceTime) {
 		return
 	}
 
@@ -1219,7 +1219,7 @@ func (ca *ConnectionAgent) updateLocalAttachmentStatus(att *netv1a1.NetworkAttac
 	att2.Status.PostCreateExecReport = pcer
 	if ifcName != "" && att.Status.IfcName != ifcName && ca.startTime.After(att.LastControllerStart.ControllerTime.Time) {
 		att2.LastControllerStart = netv1a1.ControllerStart{
-			Controller:     netv1a1.LCAControllerStart,
+			Controller:     netv1a1.LocalConnectionAgent,
 			ControllerTime: k8smetav1.NewMicroTime(ca.startTime),
 		}
 	}

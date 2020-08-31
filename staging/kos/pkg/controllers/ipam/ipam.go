@@ -923,7 +923,7 @@ func (ctlr *IPAMController) setLastControllerStart(att *netv1a1.NetworkAttachmen
 	ipamStartTime := k8smetav1.NewMicroTime(ctlr.startTime)
 	if (lastCtlrStartTime == k8smetav1.MicroTime{}) || lastCtlrStartTime.Before(&ipamStartTime) {
 		att.LastControllerStart = netv1a1.ControllerStart{
-			Controller:     netv1a1.IPAMControllerStart,
+			Controller:     netv1a1.IPAMController,
 			ControllerTime: ipamStartTime,
 		}
 	}

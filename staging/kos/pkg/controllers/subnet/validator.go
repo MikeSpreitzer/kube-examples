@@ -110,7 +110,7 @@ func setupPrometheusMetrics() {
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "subnet_create_to_validated_latency_seconds",
-			Help:      "Latency from subnet NASectionSpec to return from update writing validation outcome in status per outcome, in seconds.",
+			Help:      "Latency from subnet SubnetSectionSpec to return from update writing validation outcome in status per outcome, in seconds.",
 			Buckets:   []float64{-1, 0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64},
 		},
 		[]string{"statusErr"})
@@ -615,7 +615,7 @@ func (v *Validator) updateSubnetValidity(s1 *netv1a1.Subnet, validationErrors []
 	// the times of all the restarts and sum the intervals between such times.
 	if (lastCtlrStartTime == k8smetav1.MicroTime{}) || v.startTime.After(lastCtlrStartTime.Time) {
 		s2.LastControllerStart = netv1a1.ControllerStart{
-			Controller:     netv1a1.SVControllerStart,
+			Controller:     netv1a1.SubnetValidator,
 			ControllerTime: k8smetav1.NewMicroTime(v.startTime),
 		}
 	}

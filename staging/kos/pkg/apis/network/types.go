@@ -17,6 +17,7 @@ limitations under the License.
 package network
 
 import (
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,11 +51,13 @@ type ExtendedObjectMeta struct {
 // is valid.
 func (eom ExtendedObjectMeta) Validate() field.ErrorList {
 	errs := field.ErrorList{}
-	if !eom.LastClientWrite.IsValid() {
-		errs = append(errs, field.Invalid(field.NewPath("extendedObjectMeta.lastClientWrite"), eom.LastClientWrite, "only one of \"name\" and \"time\" is set, either none or both must be set."))
+	if err := eom.LastClientWrite.Validate(); err != nil {
+		path := field.NewPath("extendedObjectMeta").Child("lastClientWrite")
+		errs = append(errs, field.Invalid(path, eom.LastClientWrite, err.Error()))
 	}
-	if !eom.LastControllerStart.IsValid() {
-		errs = append(errs, field.Invalid(field.NewPath("extendedObjectMeta.lastControllerStart"), eom.LastControllerStart, "only one of \"controller\" and \"controllerTime\" is set, either none or both must be set."))
+	if err := eom.LastControllerStart.Validate(); err != nil {
+		path := field.NewPath("extendedObjectMeta").Child("lastControllerStart")
+		errs = append(errs, field.Invalid(path, eom.LastControllerStart, err.Error()))
 	}
 	return errs
 }
@@ -198,9 +201,9 @@ type ClientWrite struct {
 	Time metav1.MicroTime
 }
 
-// IsValid checks whether `cw` fields are consistent.
-func (cw ClientWrite) IsValid() bool {
-	return timedEventIsValid(cw.Name, cw.Time)
+// Validate checks whether `cw` fields are consistent.
+func (cw ClientWrite) Validate() error {
+	return validateTimedField(cw.Time, cw.Name, "Name")
 }
 
 // ControllerStart carries information on the start of a KOS controller.
@@ -213,23 +216,28 @@ type ControllerStart struct {
 	ControllerTime metav1.MicroTime
 }
 
-// IsValid checks whether `cs` fields are consistent.
-func (cs ControllerStart) IsValid() bool {
-	return timedEventIsValid(cs.Controller, cs.ControllerTime)
+// Validate checks whether `cs` fields are consistent.
+func (cs ControllerStart) Validate() error {
+	return validateTimedField(cs.ControllerTime, cs.Controller, "Controller")
 }
 
-func timedEventIsValid(event string, time metav1.MicroTime) bool {
-	return (event == "" && time == metav1.MicroTime{}) ||
-		(event != "" && time != metav1.MicroTime{})
+func validateTimedField(time metav1.MicroTime, fieldVal, fieldName string) error {
+	if (time == metav1.MicroTime{} && fieldVal != "") {
+		return fmt.Errorf("both %s and time must be set, but only %s is set", fieldName, fieldName)
+	}
+	if (time != metav1.MicroTime{} && fieldVal == "") {
+		return fmt.Errorf("both %s and time must be set, but only time is set", fieldName)
+	}
+	return nil
 }
 
 const (
 	SubnetClientWrite = "subnet"
 	NAClientWrite     = "na"
 
-	SVControllerStart   = "subnet_validator"
-	IPAMControllerStart = "ipam_controller"
-	LCAControllerStart  = "local_connection_agent"
+	SubnetValidator      = "subnet_validator"
+	IPAMController       = "ipam_controller"
+	LocalConnectionAgent = "local_connection_agent"
 )
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
