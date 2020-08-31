@@ -215,7 +215,7 @@ func (ca *ConnectionAgent) createLocalNetworkInterface(att *netv1a1.NetworkAttac
 	return
 }
 
-func (ca *ConnectionAgent) createRemoteNetworkInterface(att *netv1a1.NetworkAttachment, vnRelevanceTrigger string, vnRelevanceTime time.Time) (*remoteNetworkInterface, error) {
+func (ca *ConnectionAgent) createRemoteNetworkInterface(att *netv1a1.NetworkAttachment, vnRelevanceTrigger string, vnRelevanceTime, vnRelevanceLastCtlrStartTime time.Time) (*remoteNetworkInterface, error) {
 	ifc := &remoteNetworkInterface{}
 	ifc.VNI = att.Status.AddressVNI
 	ifc.GuestIP = gonet.ParseIP(att.Status.IPv4)
@@ -236,36 +236,25 @@ func (ca *ConnectionAgent) createRemoteNetworkInterface(att *netv1a1.NetworkAtta
 
 	lastClientWrName := att.LastClientWrite.Name
 	lastClientWrTime := att.LastClientWrite.Time.Time
-	lastCAStartLabelValue := ""
-	remoteIfcDelayDueToDowntimeSecs := float64(0)
-
 	if lastClientWrTime.Before(vnRelevanceTime) {
 		lastClientWrName = vnRelevanceTrigger + vnRelevanceTriggerLabelSuffix
 		lastClientWrTime = vnRelevanceTime
-
-		if att.LastControllerStart.Controller == netv1a1.LCAControllerStart && ca.startTime.Before(att.LastControllerStart.ControllerTime.Time) {
-			lastCAStartLabelValue = localCAStartLabelValue
-			remoteIfcDelayDueToDowntimeSecs = att.LastControllerStart.ControllerTime.Sub(lastClientWrTime).Seconds()
-		}
 	} else {
 		ca.localImplToRemoteIfcHistograms.
 			WithLabelValues(lastClientWrName).
 			Observe(tAfter.Sub(att.Writes.GetServerWriteTimeUnwrapped(netv1a1.NASectionImpl)).Seconds())
-
-		if ca.startTime.After(att.LastControllerStart.ControllerTime.Time) {
-			lastCAStartLabelValue = remoteCAStartLabelValue
-			remoteIfcDelayDueToDowntimeSecs = ca.startTime.Sub(lastClientWrTime).Seconds()
-		}
 	}
-
 	ca.lastClientWriteToRemoteIfcHistograms.
 		WithLabelValues(lastClientWrName).
 		Observe(tAfter.Sub(lastClientWrTime).Seconds())
 
-	if remoteIfcDelayDueToDowntimeSecs > 0 {
-		ca.remoteIfcDelayDueToDowntimeHistograms.
-			WithLabelValues(lastClientWrName, lastCAStartLabelValue).
-			Observe(remoteIfcDelayDueToDowntimeSecs)
+	remoteIfcDelayDueToRCADowntimeSecs := ca.startTime.Sub(lastClientWrTime).Seconds()
+	if remoteIfcDelayDueToRCADowntimeSecs > 0 &&
+		ca.startTime.After(vnRelevanceLastCtlrStartTime) &&
+		ca.startTime.After(att.LastControllerStart.ControllerTime.Time) {
+		ca.remoteIfcDelayDueToRCADowntimeHistograms.
+			WithLabelValues(lastClientWrName).
+			Observe(remoteIfcDelayDueToRCADowntimeSecs)
 	}
 
 	ca.remoteAttachmentsGauge.Inc()
