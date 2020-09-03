@@ -204,7 +204,7 @@ func (ca *ConnectionAgent) createLocalNetworkInterface(att *netv1a1.NetworkAttac
 		if ca.startTime.After(att.LastControllerStart.ControllerTime.Time) {
 			localIfcDelayDueToDowntimeSecs := ca.startTime.Sub(lastClientWrTime).Seconds()
 			if localIfcDelayDueToDowntimeSecs > 0 {
-				ca.localIfcDelayDueToDowntimeHistograms.
+				ca.localIfcDelayDueToLCADowntimeHistograms.
 					WithLabelValues(lastClientWrName).
 					Observe(localIfcDelayDueToDowntimeSecs)
 			}

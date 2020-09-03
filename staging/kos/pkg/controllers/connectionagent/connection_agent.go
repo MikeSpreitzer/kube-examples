@@ -287,7 +287,7 @@ type ConnectionAgent struct {
 
 	// Seconds an attachment's local interface creation is delayed by because
 	// the Connection Agent is down.
-	localIfcDelayDueToDowntimeHistograms *prometheus.HistogramVec
+	localIfcDelayDueToLCADowntimeHistograms *prometheus.HistogramVec
 
 	// Seconds from the last relevant object creation (including creation of the
 	// attachment object itself) to creation of the attachment's remote network
@@ -299,8 +299,8 @@ type ConnectionAgent struct {
 	// An attachment's remote interface creation could be delayed by downtime
 	// of a controller other than the RCA; we do not record the delay for those
 	// cases because it has already been recorded (or an upper bound for that
-	// delay has) by another histogram and to limit the number of metrics (for
-	// scalability). More details in the conversation at: https://github.com/MikeSpreitzer/kube-examples/pull/119 .
+	// delay has been) by another histogram and to limit the number of metrics
+	// (for scalability). More details in the conversation at: https://github.com/MikeSpreitzer/kube-examples/pull/119 .
 	remoteIfcDelayDueToRCADowntimeHistograms *prometheus.HistogramVec
 
 	// Seconds from attachment NASectionImpl to creation of remote network
@@ -349,11 +349,11 @@ func New(node string,
 			ConstLabels: map[string]string{"node": node},
 		},
 		[]string{lastClientWriteLabel})
-	localIfcDelayDueToDowntimeHistograms := prometheus.NewHistogramVec(
+	localIfcDelayDueToLCADowntimeHistograms := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "local_ifc_delay_due_to_downtime_seconds",
+			Name:      "local_ifc_delay_due_to_local_ca_downtime_seconds",
 			Help:      "Seconds an attachment's local interface creation is delayed by because the Connection Agent is down.",
 			Buckets:   []float64{-1, 0, 0.125, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64},
 		},
@@ -485,7 +485,7 @@ func New(node string,
 			Help:        "Version indicator",
 			ConstLabels: map[string]string{"git_commit": version.GitCommit},
 		})
-	prometheus.MustRegister(lastClientWriteToLocalIfcHistograms, localIfcDelayDueToDowntimeHistograms, lastClientWriteToRemoteIfcHistograms, remoteIfcDelayDueToRCADowntimeHistograms, localImplToRemoteIfcHistograms, fabricLatencyHistograms, lastClientWriteToStatusHistograms, attachmentStatusHistograms, localAttachmentsGauge, remoteAttachmentsGauge, attachmentExecDurationHistograms, attachmentExecStatusCounts, vnRelevanceAggregateDelaySecs, fabricNameCounts, workerCount, versionCount)
+	prometheus.MustRegister(lastClientWriteToLocalIfcHistograms, localIfcDelayDueToLCADowntimeHistograms, lastClientWriteToRemoteIfcHistograms, remoteIfcDelayDueToRCADowntimeHistograms, localImplToRemoteIfcHistograms, fabricLatencyHistograms, lastClientWriteToStatusHistograms, attachmentStatusHistograms, localAttachmentsGauge, remoteAttachmentsGauge, attachmentExecDurationHistograms, attachmentExecStatusCounts, vnRelevanceAggregateDelaySecs, fabricNameCounts, workerCount, versionCount)
 
 	fabricNameCounts.WithLabelValues(netFabric.Name()).Inc()
 	workerCount.Add(float64(workers))
@@ -516,7 +516,7 @@ func New(node string,
 		attToNetworkInterface:                    make(map[k8stypes.NamespacedName]networkInterface),
 		allowedPrograms:                          allowedPrograms,
 		lastClientWriteToLocalIfcHistograms:      lastClientWriteToLocalIfcHistograms,
-		localIfcDelayDueToDowntimeHistograms:     localIfcDelayDueToDowntimeHistograms,
+		localIfcDelayDueToLCADowntimeHistograms:  localIfcDelayDueToLCADowntimeHistograms,
 		lastClientWriteToRemoteIfcHistograms:     lastClientWriteToRemoteIfcHistograms,
 		remoteIfcDelayDueToRCADowntimeHistograms: remoteIfcDelayDueToRCADowntimeHistograms,
 		localImplToRemoteIfcHistograms:           localImplToRemoteIfcHistograms,
@@ -775,7 +775,7 @@ func (ca *ConnectionAgent) processQueueItem(attNSN k8stypes.NamespacedName, qlen
 }
 
 func (ca *ConnectionAgent) processNetworkAttachment(attNSN k8stypes.NamespacedName) error {
-	att, vnRelevanceTrigger, vnRelevanceTime, vnRelevanceLastCtlrStart, haltProcessing := ca.getNetworkAttachment(attNSN)
+	att, vnRelevanceTrigger, vnRelevanceTime, vnRelevanceLastCtlrStart, haltProcessing := ca.getAttContext(attNSN)
 	if haltProcessing {
 		return nil
 	}
@@ -810,18 +810,22 @@ func (ca *ConnectionAgent) processNetworkAttachment(attNSN k8stypes.NamespacedNa
 	return ca.updateLocalAttachmentStatus(att, ifcMAC, localIfc.Name, statusErrs, ifcPCER)
 }
 
-// getNetworkAttachment attempts to determine the univocal version of the
-// NetworkAttachment with namespaced name `attNSN`. If it succeeds it returns
-// the attachment (nil if it was deleted). The second return argument is the
-// time at which the virtual network the NetworkAttachment is in became relevant
-// on this node if the NetworkAttachment is remote (otherwise it is irrelvant).
-// The third return argument tells clients whether they should stop working on
-// the NetworkAttachment. It is set to true if an unexpected error occurs or if
-// the current state of the NetworkAttachment cannot be unambiguously determined.
-func (ca *ConnectionAgent) getNetworkAttachment(attNSN k8stypes.NamespacedName) (att *netv1a1.NetworkAttachment, vnRelevanceTrigger string, vnRelevanceTime, vnRelevanceLastCtlrStart time.Time, haltProcessing bool) {
+// getAttContext attempts to determine the univocal version of the
+// NetworkAttachment (NA) with namespaced name `attNSN`.
+// If it succeeds the return argument `att` is the NA (nil if it was deleted).
+// `vnRelevanceTrigger`, `vnRelevanceTime` and `vnRelevanceLastCtlrStart`
+// are meaningless if the NA is local. If it is remote, they are the name of the
+// client write that made the NA's VNI relevant, the time at which such client
+// write occurred, and the start time of the last controller to start among
+// those that processed the API objects that made NA's VNI relevant,
+// respectively.
+// `haltProcessing` tells clients whether they should stop working on the NA. It
+// is set to true if an unexpected error occurs or if the current state of the
+// NA cannot be unambiguously determined.
+func (ca *ConnectionAgent) getAttContext(attNSN k8stypes.NamespacedName) (att *netv1a1.NetworkAttachment, vnRelevanceTrigger string, vnRelevanceTime, vnRelevanceLastCtlrStart time.Time, haltProcessing bool) {
 	// Get the lister backed by the Informer's cache where the NetworkAttachment
 	// was seen. There could more than one.
-	attLister, vnRelevanceTrigger, vnRelevanceTime, vnRelevanceLastCtlrStart, moreThanOneLister := ca.getLister(attNSN)
+	attLister, vnRelevanceTrigger, vnRelevanceTime, vnRelevanceLastCtlrStart, moreThanOneLister := ca.getAttStage1VNStateData(attNSN)
 
 	if moreThanOneLister {
 		// If more than one lister was found the NetworkAttachment was seen in
@@ -850,7 +854,7 @@ func (ca *ConnectionAgent) getNetworkAttachment(attNSN k8stypes.NamespacedName) 
 	return
 }
 
-func (ca *ConnectionAgent) getLister(att k8stypes.NamespacedName) (lister koslisterv1a1.NetworkAttachmentNamespaceLister, vnRelevanceTrigger string, vnRelevanceTime, vnRelevanceLastCtlrStart time.Time, moreThanOneVNI bool) {
+func (ca *ConnectionAgent) getAttStage1VNStateData(att k8stypes.NamespacedName) (lister koslisterv1a1.NetworkAttachmentNamespaceLister, vnRelevanceTrigger string, vnRelevanceTime, vnRelevanceLastCtlrStart time.Time, moreThanOneVNI bool) {
 	ca.s1VirtNetsState.RLock()
 	defer ca.s1VirtNetsState.RUnlock()
 

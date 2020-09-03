@@ -44,12 +44,12 @@ func ValidateExtendedObjectMeta(eom network.ExtendedObjectMeta) field.ErrorList 
 
 // ValidateClientWrite checks whether `cw` fields are consistent.
 func ValidateClientWrite(cw network.ClientWrite) error {
-	return validateTimedField(cw.Time, cw.Name, "Name")
+	return validateTimedField(cw.Time, cw.Name, "name")
 }
 
 // ValidateControllerStart checks whether `cs` fields are consistent.
 func ValidateControllerStart(cs network.ControllerStart) error {
-	return validateTimedField(cs.ControllerTime, cs.Controller, "Controller")
+	return validateTimedField(cs.ControllerTime, cs.Controller, "controller")
 }
 
 func validateTimedField(time metav1.MicroTime, fieldVal, fieldName string) error {
