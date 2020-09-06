@@ -83,6 +83,8 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"k8s.io/apimachinery/pkg/runtime.TypeMeta":                                      schema_k8sio_apimachinery_pkg_runtime_TypeMeta(ref),
 		"k8s.io/apimachinery/pkg/runtime.Unknown":                                       schema_k8sio_apimachinery_pkg_runtime_Unknown(ref),
 		"k8s.io/apimachinery/pkg/version.Info":                                          schema_k8sio_apimachinery_pkg_version_Info(ref),
+		"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ClientWrite":             schema_pkg_apis_network_v1alpha1_ClientWrite(ref),
+		"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ControllerStart":         schema_pkg_apis_network_v1alpha1_ControllerStart(ref),
 		"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ExecReport":              schema_pkg_apis_network_v1alpha1_ExecReport(ref),
 		"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ExtendedObjectMeta":      schema_pkg_apis_network_v1alpha1_ExtendedObjectMeta(ref),
 		"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.IPLock":                  schema_pkg_apis_network_v1alpha1_IPLock(ref),
@@ -2398,6 +2400,64 @@ func schema_k8sio_apimachinery_pkg_version_Info(ref common.ReferenceCallback) co
 	}
 }
 
+func schema_pkg_apis_network_v1alpha1_ClientWrite(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ClientWrite models a write by a client. A \"client\" is any entity that is not part of the KOS control plane.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name identifies the client write.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"time": {
+						SchemaProps: spec.SchemaProps{
+							Description: "The time at which the client write happened.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"),
+						},
+					},
+				},
+				Required: []string{"name", "time"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"},
+	}
+}
+
+func schema_pkg_apis_network_v1alpha1_ControllerStart(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ControllerStart carries information on the start of a KOS controller.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"controller": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Controller is the name of the controller which started.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"controllerTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ControllerTime is the time at which the controller started, as recorded by the controller itself.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"),
+						},
+					},
+				},
+				Required: []string{"controller", "controllerTime"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"},
+	}
+}
+
 func schema_pkg_apis_network_v1alpha1_ExecReport(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -2488,11 +2548,23 @@ func schema_pkg_apis_network_v1alpha1_ExtendedObjectMeta(ref common.ReferenceCal
 							},
 						},
 					},
+					"lastClientWrite": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastClientWrite identifies the latest client write among those needed to implement the API object. Unlike `Writes`, it might describe a write on an API object other than the owning API object.",
+							Ref:         ref("k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ClientWrite"),
+						},
+					},
+					"lastControllerStart": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastControllerStart identifies the relevant controller that started last. Relevant controllers are those directly or indirectly responsible for implementing the API object.",
+							Ref:         ref("k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ControllerStart"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ObjectWrite"},
+			"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ClientWrite", "k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ControllerStart", "k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ObjectWrite"},
 	}
 }
 
@@ -2831,12 +2903,6 @@ func schema_pkg_apis_network_v1alpha1_NetworkAttachmentStatus(ref common.Referen
 							Ref: ref("k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.NetworkAttachmentErrors"),
 						},
 					},
-					"subnetCreationTime": {
-						SchemaProps: spec.SchemaProps{
-							Description: "SubnetCreationTime is the API server write time of the SubnetSectionSpec of the subnet identified by NetworkAttachmentSpec.Subnet.",
-							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"),
-						},
-					},
 					"addressContention": {
 						SchemaProps: spec.SchemaProps{
 							Description: "AddressContention indicates whether the address assignment was delayed due to not enough addresses being available at first.",
@@ -2896,7 +2962,7 @@ func schema_pkg_apis_network_v1alpha1_NetworkAttachmentStatus(ref common.Referen
 			},
 		},
 		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime", "k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ExecReport", "k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.NetworkAttachmentErrors"},
+			"k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.ExecReport", "k8s.io/examples/staging/kos/pkg/apis/network/v1alpha1.NetworkAttachmentErrors"},
 	}
 }
 

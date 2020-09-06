@@ -30,6 +30,18 @@ type ExtendedObjectMeta struct {
 	// +listMapKey=section
 	// +optional
 	Writes WriteSet `json:"writes" protobuf:"bytes,1,name=writes"`
+
+	// LastClientWrite identifies the latest client write among those needed to
+	// implement the API object. Unlike `Writes`, it might describe a write on
+	// an API object other than the owning API object.
+	// +optional
+	LastClientWrite ClientWrite `json:"lastClientWrite,omitempty" protobuf:"bytes,2,opt,name=lastClientWrite"`
+
+	// LastControllerStart identifies the relevant controller that started last.
+	// Relevant controllers are those directly or indirectly responsible for
+	// implementing the API object.
+	// +optional
+	LastControllerStart ControllerStart `json:"lastControllerStart,omitempty" protobuf:"bytes,3,opt,name=lastControllerStart"`
 }
 
 // WriteSet represents a map from section to time
@@ -161,6 +173,35 @@ func Now() metav1.MicroTime {
 	return metav1.NowMicro()
 }
 
+// ClientWrite models a write by a client. A "client" is any entity that is not
+// part of the KOS control plane.
+type ClientWrite struct {
+	// Name identifies the client write.
+	Name string `json:"name" protobuf:"bytes,1,name=name"`
+
+	// The time at which the client write happened.
+	Time metav1.MicroTime `json:"time" protobuf:"bytes,2,name=time"`
+}
+
+// ControllerStart carries information on the start of a KOS controller.
+type ControllerStart struct {
+	// Controller is the name of the controller which started.
+	Controller string `json:"controller" protobuf:"bytes,1,name=controller"`
+
+	// ControllerTime is the time at which the controller started, as recorded
+	// by the controller itself.
+	ControllerTime metav1.MicroTime `json:"controllerTime" protobuf:"bytes,2,name=controllerTime"`
+}
+
+const (
+	SubnetClientWrite = "subnet"
+	NAClientWrite     = "na"
+
+	SubnetValidator      = "subnet_validator"
+	IPAMController       = "ipam_controller"
+	LocalConnectionAgent = "local_connection_agent"
+)
+
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // NetworkAttachmentList is a list of NetworkAttachment objects.
@@ -221,44 +262,39 @@ type NetworkAttachmentStatus struct {
 	// +optional
 	Errors NetworkAttachmentErrors `json:"errors,omitempty" protobuf:"bytes,1,opt,name=errors"`
 
-	// SubnetCreationTime is the API server write time of the SubnetSectionSpec
-	// of the subnet identified by NetworkAttachmentSpec.Subnet.
-	// +optional
-	SubnetCreationTime metav1.MicroTime `json:"subnetCreationTime,omitempty" protobuf:"bytes,2,opt,name=subnetCreationTime"`
-
 	// AddressContention indicates whether the address assignment was
 	// delayed due to not enough addresses being available at first.
-	AddressContention bool `json:"addressContention,omitempty" protobuf:"bytes,3,opt,name=addressContention"`
+	AddressContention bool `json:"addressContention,omitempty" protobuf:"bytes,2,opt,name=addressContention"`
 
 	// LockUID is the UID of the IPLock object holding this attachment's
 	// IP address, or the empty string when there is no address.
 	// This field is a private detail of the implementation, not really
 	// part of the public API.
 	// +optional
-	LockUID string `json:"lockUID,omitempty" protobuf:"bytes,4,opt,name=lockUID"`
+	LockUID string `json:"lockUID,omitempty" protobuf:"bytes,3,opt,name=lockUID"`
 
 	// AddressVNI is the VNI associated with this attachment's
 	// IP address assignment, or the empty string when there is no address.
 	// +optional
-	AddressVNI uint32 `json:"addressVNI,omitempty" protobuf:"bytes,5,opt,name=addressVNI"`
+	AddressVNI uint32 `json:"addressVNI,omitempty" protobuf:"bytes,4,opt,name=addressVNI"`
 
 	// IPv4 is non-empty when an address has been assigned.
 	// +optional
-	IPv4 string `json:"ipv4,omitempty" protobuf:"bytes,6,opt,name=ipv4"`
+	IPv4 string `json:"ipv4,omitempty" protobuf:"bytes,5,opt,name=ipv4"`
 
 	// MACAddress is non-empty while there is a corresponding Linux
 	// network interface on the host.
 	// +optional
-	MACAddress string `json:"macAddress,omitempty" protobuf:"bytes,7,opt,name=macAddress"`
+	MACAddress string `json:"macAddress,omitempty" protobuf:"bytes,6,opt,name=macAddress"`
 
 	// IfcName is the name of the network interface that implements this
 	// attachment on its node, or the empty string to indicate no
 	// implementation.
 	// +optional
-	IfcName string `json:"ifcName,omitempty" protobuf:"bytes,8,opt,name=ifcname"`
+	IfcName string `json:"ifcName,omitempty" protobuf:"bytes,7,opt,name=ifcname"`
 	// HostIP is the IP address of the node the attachment is bound to.
 	// +optional
-	HostIP string `json:"hostIP,omitempty" protobuf:"bytes,9,opt,name=hostIP"`
+	HostIP string `json:"hostIP,omitempty" protobuf:"bytes,8,opt,name=hostIP"`
 
 	// PostCreateExecReport, if non-nil, reports on the run of the
 	// PostCreateExec that was launched when the Linux network
@@ -271,7 +307,7 @@ type NetworkAttachmentStatus struct {
 	// PostCreateExec of the attachment for whom the Linux network
 	// interface was first created.
 	// +optional
-	PostCreateExecReport *ExecReport `json:"postCreateExecReport,omitempty" protobuf:"bytes,10,opt,name=postCreateExecReport"`
+	PostCreateExecReport *ExecReport `json:"postCreateExecReport,omitempty" protobuf:"bytes,9,opt,name=postCreateExecReport"`
 }
 
 type NetworkAttachmentErrors struct {
@@ -409,12 +445,12 @@ type Subnet struct {
 
 	// `extendedMetadata` adds non-standard object metadata
 	// +optional
-	ExtendedObjectMeta `json:"extendedMetadata,omitempty" protobuf:"bytes,4,opt,name=extendedMetadata"`
+	ExtendedObjectMeta `json:"extendedMetadata,omitempty" protobuf:"bytes,2,opt,name=extendedMetadata"`
 
-	Spec SubnetSpec `json:"spec" protobuf:"bytes,2,name=spec"`
+	Spec SubnetSpec `json:"spec" protobuf:"bytes,3,name=spec"`
 
 	// +optional
-	Status SubnetStatus `json:"status,omitempty" protobuf:"bytes,3,opt,name=status"`
+	Status SubnetStatus `json:"status,omitempty" protobuf:"bytes,4,opt,name=status"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

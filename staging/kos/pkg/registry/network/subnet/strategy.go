@@ -36,6 +36,7 @@ import (
 	"k8s.io/klog"
 
 	"k8s.io/examples/staging/kos/pkg/apis/network"
+	"k8s.io/examples/staging/kos/pkg/apis/network/helper"
 	"k8s.io/examples/staging/kos/pkg/util/parse/network/subnet"
 )
 
@@ -109,7 +110,7 @@ func (*subnetStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Ob
 	oldSubnet := old.(*network.Subnet)
 	newSubnet := obj.(*network.Subnet)
 	newSubnet.Status = oldSubnet.Status
-	newSubnet.ExtendedObjectMeta = oldSubnet.ExtendedObjectMeta
+	newSubnet.ExtendedObjectMeta.Writes = oldSubnet.ExtendedObjectMeta.Writes
 }
 
 func SliceOfStringEqual(x, y []string) bool {
@@ -126,8 +127,10 @@ func SliceOfStringEqual(x, y []string) bool {
 
 func (ss *subnetStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	s := obj.(*network.Subnet)
+
+	errs := apimachineryvalidation.ValidateObjectMeta(&s.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
+
 	subnetSummary, parsingErrs := subnet.NewSummary(s)
-	var errs field.ErrorList
 	for _, e := range parsingErrs {
 		if e.Reason == subnet.VNIOutOfRange {
 			errs = append(errs, field.Invalid(field.NewPath("spec", "vni"), strconv.FormatUint(uint64(s.Spec.VNI), 10), e.Error()))
@@ -190,9 +193,12 @@ func (*subnetStrategy) Canonicalize(obj runtime.Object) {
 }
 
 func (ss *subnetStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	var errs field.ErrorList
-	immutableFieldMsg := "attempt to update immutable field"
 	newS, oldS := obj.(*network.Subnet), old.(*network.Subnet)
+
+	errs := apimachineryvalidation.ValidateObjectMeta(&newS.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
+	errs = append(errs, helper.ValidateExtendedObjectMeta(newS.ExtendedObjectMeta)...)
+
+	immutableFieldMsg := "attempt to update immutable field"
 	if newS.Spec.VNI != oldS.Spec.VNI {
 		errs = append(errs, field.Forbidden(field.NewPath("spec", "vni"), immutableFieldMsg))
 	}
@@ -225,7 +231,7 @@ func (subnetStatusStrategy) PrepareForUpdate(ctx context.Context, obj, old runti
 	oldSubnet := old.(*network.Subnet)
 	// update is not allowed to set spec
 	newSubnet.Spec = oldSubnet.Spec
-	newSubnet.ExtendedObjectMeta = oldSubnet.ExtendedObjectMeta
+	newSubnet.ExtendedObjectMeta.Writes = oldSubnet.ExtendedObjectMeta.Writes
 	now := network.Now()
 	if newSubnet.Status.Validated != oldSubnet.Status.Validated || !SliceOfStringEqual(newSubnet.Status.Errors, oldSubnet.Status.Errors) {
 		newSubnet.Writes = newSubnet.Writes.SetWrite(network.SubnetSectionStatus, now)
@@ -234,6 +240,6 @@ func (subnetStatusStrategy) PrepareForUpdate(ctx context.Context, obj, old runti
 
 func (subnetStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	subnet := obj.(*network.Subnet)
-	allErrs := apimachineryvalidation.ValidateObjectMeta(&subnet.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
-	return allErrs
+	errs := apimachineryvalidation.ValidateObjectMeta(&subnet.ObjectMeta, true, func(name string, prefix bool) []string { return nil }, field.NewPath("metadata"))
+	return append(errs, helper.ValidateExtendedObjectMeta(subnet.ExtendedObjectMeta)...)
 }

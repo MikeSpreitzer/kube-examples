@@ -61,9 +61,12 @@ const (
 
 // Prometheus metrics.
 var (
-	// Latency from subnet ObjectMeta.CreationTimestamp to return from update
-	// writing validation outcome in status.
+	// Latency from subnet SubnetSectionSpec to return from update writing
+	// validation outcome in status.
 	subnetCreateToValidatedHistograms *prometheus.HistogramVec
+
+	// Seconds from subnet creation to start of validator, if positive.
+	validationDelayDueToDowntimeHistograms *prometheus.HistogramVec
 
 	// Round trip time to update Subnet status.
 	subnetUpdateHistograms *prometheus.HistogramVec
@@ -107,13 +110,23 @@ func setupPrometheusMetrics() {
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "subnet_create_to_validated_latency_seconds",
-			Help:      "Latency from subnet CreationTimestamp to return from update writing validation outcome in status per outcome, in seconds.",
+			Help:      "Latency from subnet SubnetSectionSpec to return from update writing validation outcome in status per outcome, in seconds.",
 			Buckets:   []float64{-1, 0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64},
 		},
 		[]string{"statusErr"})
 	errValT, errValF := FormatErrVal(true), FormatErrVal(false)
 	subnetCreateToValidatedHistograms.WithLabelValues(errValT)
 	subnetCreateToValidatedHistograms.WithLabelValues(errValF)
+
+	validationDelayDueToDowntimeHistograms = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "validation_delay_due_to_downtime_seconds",
+			Help:      "Seconds a subnet validation is delayed by because the Validator is down.",
+			Buckets:   []float64{-1, 0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64},
+		},
+		[]string{"statusErr"})
 
 	subnetUpdateHistograms = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -194,7 +207,7 @@ func setupPrometheusMetrics() {
 			ConstLabels: map[string]string{"git_commit": version.GitCommit},
 		})
 
-	prometheus.MustRegister(subnetCreateToValidatedHistograms, subnetUpdateHistograms, liveListHistograms, liveListResultLengthHistogram, duplicateWorkCount, staleSubnetsSuppressionCount, cacheVsLiveSubnetMismatches, workerCount, versionCount)
+	prometheus.MustRegister(subnetCreateToValidatedHistograms, validationDelayDueToDowntimeHistograms, subnetUpdateHistograms, liveListHistograms, liveListResultLengthHistogram, duplicateWorkCount, staleSubnetsSuppressionCount, cacheVsLiveSubnetMismatches, workerCount, versionCount)
 }
 
 // conflictsCache holds information for one subnet regarding conflicts with
@@ -231,6 +244,7 @@ type Validator struct {
 	eventRecorder  k8seventrecord.EventRecorder
 	queue          k8sworkqueue.RateLimitingInterface
 	workers        int
+	startTime      time.Time
 
 	// conflicts associates a subnet namespaced name with its conflictsCache.
 	// Always access while holding conflictsMutex.
@@ -286,6 +300,8 @@ func (v *Validator) Run(stop <-chan struct{}) error {
 		return errors.New("informer cache failed to sync")
 	}
 	klog.V(2).Infof("Informer cache synced.")
+
+	v.startTime = time.Now()
 
 	// Start workers.
 	for i := 0; i < v.workers; i++ {
@@ -583,12 +599,33 @@ func (v *Validator) updateSubnetValidity(s1 *netv1a1.Subnet, validationErrors []
 	s2 := s1.DeepCopy()
 	s2.Status.Validated = validated
 	s2.Status.Errors = validationErrors
+	subnetCreateTime := s1.Writes.GetServerWriteTime(netv1a1.SubnetSectionSpec)
+	if (s2.LastClientWrite.Time == k8smetav1.MicroTime{}) || s2.LastClientWrite.Time.Before(&subnetCreateTime) {
+		s2.LastClientWrite = netv1a1.ClientWrite{
+			Name: netv1a1.SubnetClientWrite,
+			Time: subnetCreateTime,
+		}
+	}
+	lastCtlrStartTime := s2.LastControllerStart.ControllerTime
+	//! If there are multiple validator crashes and restarts, this always
+	// records the start time of the latest validator. Because
+	// `LastControllerStart` is used to compute the delay caused by controllers
+	// downtime with which API objects are processed, the delay might be
+	// overestimated. Probably the only way to get the delay right is to record
+	// the times of all the restarts and sum the intervals between such times.
+	if (lastCtlrStartTime == k8smetav1.MicroTime{}) || v.startTime.After(lastCtlrStartTime.Time) {
+		s2.LastControllerStart = netv1a1.ControllerStart{
+			Controller:     netv1a1.SubnetValidator,
+			ControllerTime: k8smetav1.NewMicroTime(v.startTime),
+		}
+	}
 
 	tBefore := time.Now()
 	s3, err := v.netIfc.Subnets(s2.Namespace).UpdateStatus(s2)
 	tAfter := time.Now()
+	statusErrL := FormatErrVal(len(validationErrors) > 0)
 	subnetUpdateHistograms.
-		WithLabelValues(FormatErrVal(err != nil), FormatErrVal(len(validationErrors) > 0)).
+		WithLabelValues(FormatErrVal(err != nil), statusErrL).
 		Observe(tAfter.Sub(tBefore).Seconds())
 	switch {
 	case err == nil:
@@ -600,8 +637,14 @@ func (v *Validator) updateSubnetValidity(s1 *netv1a1.Subnet, validationErrors []
 		v.updateStaleRV(nsn, s1.ResourceVersion)
 		if !s1.Status.Validated && len(s1.Status.Errors) == 0 {
 			subnetCreateToValidatedHistograms.
-				WithLabelValues(FormatErrVal(len(validationErrors) > 0)).
-				Observe(tAfter.Sub(s1.CreationTimestamp.Time).Seconds())
+				WithLabelValues(statusErrL).
+				Observe(tAfter.Sub(subnetCreateTime.Time).Seconds())
+			validationDelayDueToDowntimeSecs := v.startTime.Sub(subnetCreateTime.Time).Seconds()
+			if validationDelayDueToDowntimeSecs > 0 {
+				validationDelayDueToDowntimeHistograms.
+					WithLabelValues(statusErrL).
+					Observe(validationDelayDueToDowntimeSecs)
+			}
 		}
 		if validated {
 			v.eventRecorder.Event(s3, k8scorev1api.EventTypeNormal, "SubnetValidated", "")

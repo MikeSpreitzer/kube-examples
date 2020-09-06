@@ -64,10 +64,9 @@ const (
 	metricsNamespace = "kos"
 	metricsSubsystem = "ipam"
 
-	contentionLabel       = "contention"
-	lastClientWriteLabel  = "last_client_wr"
-	subnetLastClientWrite = "subnet"
-	naLastClientWrite     = "na"
+	contentionLabel          = "contention"
+	lastClientWriteLabel     = "last_client_wr"
+	lastControllerStartLabel = "last_controller_start"
 )
 
 type IPAMController struct {
@@ -81,6 +80,7 @@ type IPAMController struct {
 	eventRecorder  k8seventrecord.EventRecorder
 	queue          k8sworkqueue.RateLimitingInterface
 	workers        int
+	startTime      time.Time
 	attsMutex      sync.Mutex
 	atts           map[k8stypes.NamespacedName]*NetworkAttachmentData
 	addrCacheMutex sync.Mutex
@@ -109,6 +109,10 @@ type IPAMController struct {
 
 	// Was the IP address in the Status not in the cache (0 or 1)?
 	statusUsedHistogram prometheus.Histogram
+
+	// Seconds an IP address assignment is delayed by because the IPAM
+	// Controller or the Subnet Validator is down.
+	addressDelayDueToDowntimeHistograms *prometheus.HistogramVec
 }
 
 // NetworkAttachmentData holds the local state for a
@@ -217,6 +221,16 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 			Buckets:   []float64{0, 1},
 		})
 
+	addressDelayDueToDowntimeHistograms := prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "address_delay_due_to_downtime_seconds",
+			Help:      "Seconds an IP address assignment is delayed by because the IPAM controller or the Subnet Validator is down.",
+			Buckets:   []float64{-1, 0, 0.125, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64},
+		},
+		[]string{lastClientWriteLabel, lastControllerStartLabel})
+
 	workerCount := prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -234,7 +248,7 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 			ConstLabels: map[string]string{"git_commit": version.GitCommit},
 		})
 
-	prometheus.MustRegister(addressContentionHistogram, lastClientWriteToLockHistograms, lockOpHistograms, lastClientWriteToAddressHistograms, attachmentUpdateHistograms, anticipationUsedHistogram, statusUsedHistogram, workerCount, versionCount)
+	prometheus.MustRegister(addressContentionHistogram, lastClientWriteToLockHistograms, lockOpHistograms, lastClientWriteToAddressHistograms, attachmentUpdateHistograms, anticipationUsedHistogram, statusUsedHistogram, addressDelayDueToDowntimeHistograms, workerCount, versionCount)
 
 	workerCount.Add(float64(workers))
 	versionCount.Add(1)
@@ -248,25 +262,26 @@ func NewController(netIfc kosclientv1a1.NetworkV1alpha1Interface,
 	lockInformer.AddIndexers(map[string]k8scache.IndexFunc{owningAttachmentIdxName: OwningAttachments})
 
 	return &IPAMController{
-		netIfc:                             netIfc,
-		subnetInformer:                     subnetInformer,
-		subnetLister:                       subnetLister,
-		netattInformer:                     netattInformer,
-		netattLister:                       netattLister,
-		lockInformer:                       lockInformer,
-		lockLister:                         lockLister,
-		eventRecorder:                      eventRecorder,
-		queue:                              queue,
-		workers:                            workers,
-		atts:                               make(map[k8stypes.NamespacedName]*NetworkAttachmentData),
-		addrCache:                          make(map[uint32]uint32set.UInt32SetChooser),
-		addressContentionHistogram:         addressContentionHistogram,
-		lastClientWriteToLockHistograms:    lastClientWriteToLockHistograms,
-		lockOpHistograms:                   lockOpHistograms,
-		lastClientWriteToAddressHistograms: lastClientWriteToAddressHistograms,
-		attachmentUpdateHistograms:         attachmentUpdateHistograms,
-		anticipationUsedHistogram:          anticipationUsedHistogram,
-		statusUsedHistogram:                statusUsedHistogram,
+		netIfc:                              netIfc,
+		subnetInformer:                      subnetInformer,
+		subnetLister:                        subnetLister,
+		netattInformer:                      netattInformer,
+		netattLister:                        netattLister,
+		lockInformer:                        lockInformer,
+		lockLister:                          lockLister,
+		eventRecorder:                       eventRecorder,
+		queue:                               queue,
+		workers:                             workers,
+		atts:                                make(map[k8stypes.NamespacedName]*NetworkAttachmentData),
+		addrCache:                           make(map[uint32]uint32set.UInt32SetChooser),
+		addressContentionHistogram:          addressContentionHistogram,
+		lastClientWriteToLockHistograms:     lastClientWriteToLockHistograms,
+		lockOpHistograms:                    lockOpHistograms,
+		lastClientWriteToAddressHistograms:  lastClientWriteToAddressHistograms,
+		attachmentUpdateHistograms:          attachmentUpdateHistograms,
+		anticipationUsedHistogram:           anticipationUsedHistogram,
+		statusUsedHistogram:                 statusUsedHistogram,
+		addressDelayDueToDowntimeHistograms: addressDelayDueToDowntimeHistograms,
 	}
 }
 
@@ -294,6 +309,9 @@ func (ctlr *IPAMController) Run(stopCh <-chan struct{}) error {
 		return errors.New("informers' caches failed to sync")
 	}
 	klog.V(2).Info("Informers' caches synced.")
+
+	ctlr.startTime = time.Now()
+
 	for i := 0; i < ctlr.workers; i++ {
 		go k8swait.Until(ctlr.processQueue, time.Second, stopCh)
 	}
@@ -473,7 +491,7 @@ func (ctlr *IPAMController) processNetworkAttachment(ns, name string) error {
 	if nadat != nil && att != nil {
 		nadat.addressContention = nadat.addressContention || att.Status.AddressContention
 	}
-	subnetName, subnetUID, subnetCreateTime, desiredVNI, desiredBaseU, desiredLastU, lockInStatus, lockForStatus, statusErrs, err, ok := ctlr.analyzeAndRelease(ns, name, att, nadat)
+	subnetName, subnetUID, subnetLastClientWrite, subnetLastControllerStart, desiredVNI, desiredBaseU, desiredLastU, lockInStatus, lockForStatus, statusErrs, err, ok := ctlr.analyzeAndRelease(ns, name, att, nadat)
 	if err != nil || !ok {
 		return err
 	}
@@ -501,6 +519,7 @@ func (ctlr *IPAMController) processNetworkAttachment(ns, name string) error {
 			ctlr.anticipationUsedHistogram.Observe(0)
 		}
 	}()
+	lastClientWrite := getLastClientWrite(att, subnetLastClientWrite)
 	var fullSubnetErr error
 	if len(statusErrs) > 0 {
 	} else if lockForStatus.Obj != nil {
@@ -514,7 +533,7 @@ func (ctlr *IPAMController) processNetworkAttachment(ns, name string) error {
 		anticipationUsed = true
 		return nil
 	} else {
-		lockForStatus, ipForStatus, err = ctlr.pickAndLockAddress(ns, name, att, subnetName, desiredVNI, desiredBaseU, desiredLastU, nadat.addressContention, subnetCreateTime)
+		lockForStatus, ipForStatus, err = ctlr.pickAndLockAddress(ns, name, att, subnetName, desiredVNI, desiredBaseU, desiredLastU, nadat.addressContention, lastClientWrite)
 		contentionNow := isFullSubnetErr(err)
 		nadat.addressContention = nadat.addressContention || contentionNow
 		if contentionNow && !fullSubnetMsgFound(att.Status.Errors.IPAM) {
@@ -524,7 +543,7 @@ func (ctlr *IPAMController) processNetworkAttachment(ns, name string) error {
 			return err
 		}
 	}
-	err = ctlr.updateNAStatus(ns, name, att, nadat, statusErrs, subnetUID, lockForStatus, ipForStatus, subnetCreateTime)
+	err = ctlr.updateNAStatus(ns, name, att, nadat, statusErrs, subnetUID, lockForStatus, ipForStatus, lastClientWrite, subnetLastControllerStart)
 	if fullSubnetErr != nil {
 		if err != nil {
 			return fmt.Errorf("%s; %s", fullSubnetErr.Error(), err.Error())
@@ -532,6 +551,17 @@ func (ctlr *IPAMController) processNetworkAttachment(ns, name string) error {
 		return fullSubnetErr
 	}
 	return err
+}
+
+func getLastClientWrite(att *netv1a1.NetworkAttachment, subnetLastClientWr netv1a1.ClientWrite) netv1a1.ClientWrite {
+	attCreationTime := att.Writes.GetServerWriteTime(netv1a1.NASectionSpec)
+	if (subnetLastClientWr.Time == k8smetav1.MicroTime{}) || subnetLastClientWr.Time.Before(&attCreationTime) {
+		return netv1a1.ClientWrite{
+			Name: netv1a1.NAClientWrite,
+			Time: attCreationTime,
+		}
+	}
+	return subnetLastClientWr
 }
 
 func isFullSubnetErr(e error) bool {
@@ -547,7 +577,7 @@ func fullSubnetMsgFound(messages []string) (found bool) {
 	return
 }
 
-func (ctlr *IPAMController) analyzeAndRelease(ns, name string, att *netv1a1.NetworkAttachment, nadat *NetworkAttachmentData) (subnetName string, subnetUID k8stypes.UID, subnetCreateTime time.Time, desiredVNI, desiredBaseU, desiredLastU uint32, lockInStatus, lockForStatus ParsedLock, statusErrs []string, err error, ok bool) {
+func (ctlr *IPAMController) analyzeAndRelease(ns, name string, att *netv1a1.NetworkAttachment, nadat *NetworkAttachmentData) (subnetName string, subnetUID k8stypes.UID, subnetLastClientWrite netv1a1.ClientWrite, subnetLastControllerStart netv1a1.ControllerStart, desiredVNI, desiredBaseU, desiredLastU uint32, lockInStatus, lockForStatus ParsedLock, statusErrs []string, err error, ok bool) {
 	statusLockUID := "<none>"
 	ipInStatus := ""
 	attUID := "."
@@ -569,7 +599,8 @@ func (ctlr *IPAMController) analyzeAndRelease(ns, name string, att *netv1a1.Netw
 		if subnet != nil && subnet.Status.Validated {
 			desiredVNI = subnet.Spec.VNI
 			subnetUID = subnet.UID
-			subnetCreateTime = subnet.Writes.GetServerWriteTimeUnwrapped(netv1a1.SubnetSectionSpec)
+			subnetLastClientWrite = subnet.LastClientWrite
+			subnetLastControllerStart = subnet.LastControllerStart
 			var ipNet *gonet.IPNet
 			_, ipNet, err = gonet.ParseCIDR(subnet.Spec.IPv4)
 			if err != nil {
@@ -717,7 +748,7 @@ func (ctlr *IPAMController) deleteIPLockObject(parsed ParsedLock) error {
 	return nil
 }
 
-func (ctlr *IPAMController) pickAndLockAddress(ns, name string, att *netv1a1.NetworkAttachment, subnetName string, vni, subnetBaseU, subnetLastU uint32, prevAddressContention bool, subnetCreateTime time.Time) (lockForStatus ParsedLock, ipForStatus gonet.IP, err error) {
+func (ctlr *IPAMController) pickAndLockAddress(ns, name string, att *netv1a1.NetworkAttachment, subnetName string, vni, subnetBaseU, subnetLastU uint32, prevAddressContention bool, lastClientWrite netv1a1.ClientWrite) (lockForStatus ParsedLock, ipForStatus gonet.IP, err error) {
 	addrMin, addrMax := subnetBaseU, subnetLastU
 	if addrMax-addrMin >= 4 {
 		addrMin, addrMax = subnetBaseU+2, subnetLastU-1
@@ -768,15 +799,9 @@ func (ctlr *IPAMController) pickAndLockAddress(ns, name string, att *netv1a1.Net
 			ctlr.eventRecorder.Eventf(att, k8scorev1api.EventTypeNormal, "AddressAssigned", "Assigned IPv4 address %s", ipForStatus)
 			klog.V(4).Infof("Locked IP address %s for %s/%s=%s, lockName=%s, lockUID=%s, Status.IPv4 was %q", ipForStatus, ns, name, string(att.UID), lockName, string(ipl2.UID), att.Status.IPv4)
 			if len(att.Status.IPv4) == 0 {
-				lastClientWrite := naLastClientWrite
-				lastClientWriteTime := att.Writes.GetServerWriteTimeUnwrapped(netv1a1.NASectionSpec)
-				if lastClientWriteTime.Before(subnetCreateTime) {
-					lastClientWrite = subnetLastClientWrite
-					lastClientWriteTime = subnetCreateTime
-				}
 				ctlr.lastClientWriteToLockHistograms.
-					WithLabelValues(lastClientWrite, strconv.FormatBool(prevAddressContention)).
-					Observe(ipl2.Writes.GetServerWriteTime(netv1a1.IPLockSectionSpec).Sub(lastClientWriteTime).Seconds())
+					WithLabelValues(lastClientWrite.Name, strconv.FormatBool(prevAddressContention)).
+					Observe(ipl2.Writes.GetServerWriteTime(netv1a1.IPLockSectionSpec).Sub(lastClientWrite.Time.Time).Seconds())
 			}
 			break
 		} else if k8serrors.IsAlreadyExists(err) {
@@ -825,7 +850,7 @@ func (ctlr *IPAMController) pickAndLockAddress(ns, name string, att *netv1a1.Net
 	return
 }
 
-func (ctlr *IPAMController) updateNAStatus(ns, name string, att *netv1a1.NetworkAttachment, nadat *NetworkAttachmentData, statusErrs []string, subnetUID k8stypes.UID, lockForStatus ParsedLock, ipForStatus gonet.IP, subnetCreateTime time.Time) error {
+func (ctlr *IPAMController) updateNAStatus(ns, name string, att *netv1a1.NetworkAttachment, nadat *NetworkAttachmentData, statusErrs []string, subnetUID k8stypes.UID, lockForStatus ParsedLock, ipForStatus gonet.IP, lastClientWrite netv1a1.ClientWrite, subnetLastControllerStart netv1a1.ControllerStart) error {
 	test, _ := ctlr.netattLister.NetworkAttachments(ns).Get(name)
 	if test == nil { // It has been deleted, don't bother
 		klog.V(4).Infof("Did not attempt to update status of deleted NetworkAttachment %s/%s", ns, name)
@@ -833,7 +858,6 @@ func (ctlr *IPAMController) updateNAStatus(ns, name string, att *netv1a1.Network
 	}
 	att2 := att.DeepCopy()
 	att2.Status.Errors.IPAM = statusErrs
-	att2.Status.SubnetCreationTime = k8smetav1.NewMicroTime(subnetCreateTime)
 	att2.Status.AddressContention = nadat.addressContention
 	att2.Status.LockUID = string(lockForStatus.UID)
 	att2.Status.AddressVNI = lockForStatus.VNI
@@ -842,6 +866,9 @@ func (ctlr *IPAMController) updateNAStatus(ns, name string, att *netv1a1.Network
 	} else {
 		att2.Status.IPv4 = ipForStatus.String()
 	}
+	att2.LastClientWrite = lastClientWrite
+	ctlr.setLastControllerStart(att2, subnetLastControllerStart)
+
 	attachmentOps := ctlr.netIfc.NetworkAttachments(ns)
 	tBefore := time.Now()
 	att3, err := attachmentOps.UpdateStatus(att2)
@@ -852,17 +879,18 @@ func (ctlr *IPAMController) updateNAStatus(ns, name string, att *netv1a1.Network
 	if err == nil {
 		deltaSecs := "unknown"
 		if ipForStatus != nil {
-			lastClientWrite := naLastClientWrite
-			lastClientWriteTime := att.Writes.GetServerWriteTimeUnwrapped(netv1a1.NASectionSpec)
-			if lastClientWriteTime.Before(subnetCreateTime) {
-				lastClientWrite = subnetLastClientWrite
-				lastClientWriteTime = subnetCreateTime
-			}
-			ds := att3.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Sub(lastClientWriteTime).Seconds()
+			ds := att3.Writes.GetServerWriteTime(netv1a1.NASectionAddr).Sub(lastClientWrite.Time.Time).Seconds()
 			ctlr.lastClientWriteToAddressHistograms.
-				WithLabelValues(lastClientWrite, strconv.FormatBool(nadat.addressContention)).
+				WithLabelValues(lastClientWrite.Name, strconv.FormatBool(nadat.addressContention)).
 				Observe(ds)
 			deltaSecs = strconv.FormatFloat(ds, 'f', 2, 64)
+
+			addressDelayDueToDowntimeSecs := att3.LastControllerStart.ControllerTime.Sub(lastClientWrite.Time.Time).Seconds()
+			if addressDelayDueToDowntimeSecs > 0 {
+				ctlr.addressDelayDueToDowntimeHistograms.
+					WithLabelValues(lastClientWrite.Name, att3.LastControllerStart.Controller).
+					Observe(addressDelayDueToDowntimeSecs)
+			}
 		}
 		if len(statusErrs) > 0 {
 			klog.V(4).Infof("Recorded errors %v in status of %s/%s, subnetUID=%s, old ResourceVersion=%s, new ResourceVersion=%s, deltaSecs=%s", statusErrs, ns, name, subnetUID, att.ResourceVersion, att3.ResourceVersion, deltaSecs)
@@ -886,6 +914,23 @@ func (ctlr *IPAMController) updateNAStatus(ns, name string, att *netv1a1.Network
 		return nil
 	}
 	return fmt.Errorf("%s: %s", errMsg, err.Error())
+}
+
+// TODO: Think whether after appropriate generalizations this can be made an
+// ExtendedObjectMeta function that is reused across controllers.
+func (ctlr *IPAMController) setLastControllerStart(att *netv1a1.NetworkAttachment, subnetLastCtlrStart netv1a1.ControllerStart) {
+	lastCtlrStartTime := att.LastControllerStart.ControllerTime
+	ipamStartTime := k8smetav1.NewMicroTime(ctlr.startTime)
+	if (lastCtlrStartTime == k8smetav1.MicroTime{}) || lastCtlrStartTime.Before(&ipamStartTime) {
+		att.LastControllerStart = netv1a1.ControllerStart{
+			Controller:     netv1a1.IPAMController,
+			ControllerTime: ipamStartTime,
+		}
+	}
+	subnetLastCtlrStartTime := subnetLastCtlrStart.ControllerTime
+	if (subnetLastCtlrStartTime != k8smetav1.MicroTime{}) && att.LastControllerStart.ControllerTime.Before(&subnetLastCtlrStartTime) {
+		att.LastControllerStart = subnetLastCtlrStart
+	}
 }
 
 func (ctlr *IPAMController) getNetworkAttachmentData(ns, name string, addIfMissing bool) *NetworkAttachmentData {

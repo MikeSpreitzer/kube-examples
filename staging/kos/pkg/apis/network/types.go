@@ -30,6 +30,18 @@ type ExtendedObjectMeta struct {
 	// +listMapKey=section
 	// +optional
 	Writes WriteSet
+
+	// LastClientWrite identifies the latest client write among those needed to
+	// implement the API object. Unlike `Writes`, it might describe a write on
+	// an API object other than the owning API object.
+	// +optional
+	LastClientWrite ClientWrite
+
+	// LastControllerStart identifies the relevant controller that started last.
+	// Relevant controllers are those directly or indirectly responsible for
+	// implementing the API object.
+	// +optional
+	LastControllerStart ControllerStart
 }
 
 // WriteSet represents a map from section to time
@@ -161,6 +173,35 @@ func Now() metav1.MicroTime {
 	return metav1.NowMicro()
 }
 
+// ClientWrite models a write by a client. A "client" is any entity that is not
+// part of the KOS control plane.
+type ClientWrite struct {
+	// Name identifies the client write.
+	Name string
+
+	// The time at which the client write happened.
+	Time metav1.MicroTime
+}
+
+// ControllerStart carries information on the start of a KOS controller.
+type ControllerStart struct {
+	// Controller is the name of the controller which started.
+	Controller string
+
+	// ControllerTime is the time at which the controller started, as recorded
+	// by the controller itself.
+	ControllerTime metav1.MicroTime
+}
+
+const (
+	SubnetClientWrite = "subnet"
+	NAClientWrite     = "na"
+
+	SubnetValidator      = "subnet_validator"
+	IPAMController       = "ipam_controller"
+	LocalConnectionAgent = "local_connection_agent"
+)
+
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // NetworkAttachmentList is a list of NetworkAttachment objects.
@@ -220,11 +261,6 @@ type NetworkAttachmentSpec struct {
 type NetworkAttachmentStatus struct {
 	// +optional
 	Errors NetworkAttachmentErrors
-
-	// SubnetCreationTime is the API server write time of the SubnetSectionSpec
-	// of the subnet identified by NetworkAttachmentSpec.Subnet.
-	// +optional
-	SubnetCreationTime metav1.MicroTime
 
 	// AddressContention indicates whether the address assignment was
 	// delayed due to not enough addresses being available at first.
