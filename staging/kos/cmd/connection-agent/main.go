@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	gonet "net"
 	"os"
 	"os/signal"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/logs"
 	"k8s.io/klog"
+	"k8s.io/kubernetes/pkg/util/flock"
 
 	kosclientset "k8s.io/examples/staging/kos/pkg/client/clientset/versioned"
 	"k8s.io/examples/staging/kos/pkg/controllers/connectionagent"
@@ -53,6 +55,8 @@ const (
 
 	networkAPIHost = "network-api"
 	networkAPIPort = "443"
+
+	defaultLockFile = "/kos/ca/node.lock"
 )
 
 func main() {
@@ -63,6 +67,7 @@ func main() {
 		caFile                 string
 		allowedPrograms        string
 		kubeconfigFilename     string
+		lockFile               string
 		workers                int
 		clientQPS, clientBurst int
 		blockProfileRate       int
@@ -74,6 +79,7 @@ func main() {
 	flag.StringVar(&caFile, "network-api-ca", "", "file path to the CA's certificate for the Network API")
 	flag.StringVar(&allowedPrograms, "allowed-programs", "", "comma-separated list of allowed pathnames for post-create and post-delete execs")
 	flag.StringVar(&kubeconfigFilename, "kubeconfig", "", "kubeconfig filename")
+	flag.StringVar(&lockFile, "lock-file", defaultLockFile, "full path of the connection agent lock file")
 	flag.IntVar(&workers, "workers", defaultNumWorkers, "number of worker threads")
 	flag.IntVar(&clientQPS, "qps", defaultClientQPS, "limit on rate of calls to api-server")
 	flag.IntVar(&clientBurst, "burst", defaultClientBurst, "allowance for transient burst of calls to api-server")
@@ -92,6 +98,12 @@ func main() {
 	}
 	if mutexProfileFraction > 0 {
 		runtime.SetMutexProfileFraction(mutexProfileFraction)
+	}
+
+	if lockFile != "" {
+		if err := flock.Acquire(lockFile); err != nil {
+			panic(fmt.Sprintf("failed to acquire lockfile %s to ensure there's only this Connection Agent on the node: %s", lockFile, err))
+		}
 	}
 
 	var err error
