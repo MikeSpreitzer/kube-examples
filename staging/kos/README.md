@@ -4,10 +4,15 @@ This example shows how to build a simple Software-Defined-Networking
 (SDN) control plane using Kubernetes API machinery to build the
 control plane and Kubernetes itself to host the control plane.  The
 purpose is to explore how well suited the Kubernetes API-machinery is
-to building something other than Kubernetes.  Some interesting issues
-are surfaced in the discussions of the controllers here.
+to building something other than Kubernetes.  Some interesting and
+relevant issues are surfaced in the discussions of the controllers
+here. These issues and their solutions, as well as a general overview
+of the SDN, were presented at the at the KubeCon EU 2020 talk
+"Building a Software-Defined-Network Using K8s API Machinery and Controllers":
+- [talk](https://www.youtube.com/watch?v=WX-8Of8AQuw)
+- [slides](https://static.sched.com/hosted_files/kccnceu20/15/Building-a-software-defined-network-using-K8s-API-Machinery-and-Controllers.pdf)
 
-The data plane is based on OVS.  Each node has an independent OVS
+The data plane of the SDN is based on OVS.  Each node has an independent OVS
 installation.  The kube-based control plane distributes the needed
 information to each node.
 
@@ -501,6 +506,13 @@ discussed above to identify which KOS subset(s) each node belongs to.
 
 ### Prometheus and Grafana
 
+**The information in the following paragraphs is outdated**. Please
+refer to [this](https://github.com/MikeSpreitzer/kos-test/blob/master/README.md)
+document instead. The Prometheus and Grafana configuration files in
+this repo are no longer being maintained and do not work because they
+are out of sync with the rest of KOS. We will either remove or update
+them in the future (hopefully soon).
+
 An example of how to deploy and configure Prometheus and Grafana is in
 `kos/metrics/`.  Deploy this with the following commands, with `kos` as
 your current working directory.
@@ -595,6 +607,12 @@ with the proper container image references.  These are used in the
 next step.
 
 ### Deploy
+
+**The information in the following paragraphs is outdated**. Please
+refer to [this](https://github.com/MikeSpreitzer/kos-test/blob/master/README.md)
+document instead. The deploy machinery in this repo in no longer being
+maintained and does not work because it is out of sync with the rest of
+KOS. We will either remove or update it in the future (hopefully soon).
 
 With `kos` as your current working directory and with `kubectl`
 configured to manipulate your target Kubernetes cluster as a
